@@ -109,6 +109,21 @@ def test_installed_plugins_expose_actual_usage_seconds(client: TestClient, monke
     assert response.json()["plugins"][0]["usage_seconds"] == 259_200.5
 
 
+@pytest.mark.parametrize("status", ["timed_out", "failed"])
+def test_installed_plugins_keep_startup_diagnostics_before_runtime_ready(client: TestClient, monkeypatch, status) -> None:
+    reason = "加载仍在等待" if status == "timed_out" else "on_load failed: invalid endpoint"
+
+    async def snapshot():
+        return {"statuses": {"test.demo": status}, "failure_reasons": {"test.demo": reason},
+                "circuit_statuses": {}, "running": False, "usage_seconds": {}}
+
+    monkeypatch.setattr(integration_module.get_plugin_runtime_manager(), "get_plugin_state_snapshot", snapshot)
+    plugin = client.get("/api/webui/plugins/installed").json()["plugins"][0]
+    assert plugin["load_status"] == status
+    assert plugin["load_error"] == reason
+    assert not plugin["loaded"]
+
+
 def test_plugin_usage_reads_runtime_without_scanning_directories(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr(
         integration_module.get_plugin_runtime_manager(), "get_plugin_usage_seconds", lambda: {"test.demo": 123.5}
@@ -149,7 +164,7 @@ def test_installed_plugins_expose_duplicate_id_failure_reason(client: TestClient
 
 @pytest.mark.parametrize("runtime_status, expected", [
     ("failed", "disabled"), ("offline", "disabled"),
-    ("success", "success"), ("loading", "loading"), ("stopping", "stopping"),
+    ("success", "success"), ("loading", "loading"), ("timed_out", "timed_out"), ("stopping", "stopping"),
 ])
 def test_disabled_plugin_ignores_scan_failures_but_preserves_live_state(
     client: TestClient, monkeypatch, runtime_status: str, expected: str,
@@ -168,7 +183,7 @@ def test_disabled_plugin_ignores_scan_failures_but_preserves_live_state(
     plugin = response.json()["plugins"][0]
     assert plugin["enabled"] is False
     assert plugin["load_status"] == expected
-    assert plugin["load_error"] == ""
+    assert plugin["load_error"] == ("Host 版本不兼容" if expected == "timed_out" else "")
 
 
 def test_installed_plugins_expose_offline_adapter_status(client: TestClient, monkeypatch) -> None:

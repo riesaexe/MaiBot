@@ -353,6 +353,12 @@ class RunnerReadyPayload(BaseModel):
     """仅因插件自身配置禁用而未激活的插件列表，不包含依赖阻塞"""
 
 
+class RunnerStartupProgressPayload(RunnerReadyPayload):
+    """runner.startup_progress 广播：本轮已完成结果和仍在等待的插件。"""
+
+    loading_plugins: List[str] = Field(default_factory=list, description="尚未完成初始化的插件列表")
+
+
 # ====== 配置更新 ======
 class ConfigUpdatedPayload(BaseModel):
     """plugin.config_updated 事件 payload"""

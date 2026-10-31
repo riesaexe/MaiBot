@@ -852,7 +852,7 @@ def _collect_installed_plugins(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 # 扫描阶段的兼容性/依赖检查失败不代表禁用插件启动失败；
                 # 仅保留实际运行或正在启停的状态，避免掩盖尚未完成的禁用操作。
                 effective_load_status = (
-                    "disabled" if enabled is False and load_status not in {"success", "loading", "stopping"}
+                    "disabled" if enabled is False and load_status not in {"success", "loading", "timed_out", "stopping"}
                     else load_status
                 )
                 changelog = read_local_document(plugin_path, manifest, "changelog")
@@ -866,7 +866,7 @@ def _collect_installed_plugins(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                         "loaded": effective_load_status == "success",
                         "load_status": effective_load_status,
                         "usage_seconds": usage_seconds.get(plugin_id, 0.0),
-                        "load_error": load_error if effective_load_status == "failed" else "",
+                        "load_error": load_error if effective_load_status in {"failed", "timed_out"} else "",
                         "circuit_status": circuit_status,
                         "changelog": changelog,
                         "release": read_release_receipt(plugin_path),

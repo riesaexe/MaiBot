@@ -23,7 +23,7 @@ def test_handshake_timeout_keeps_failure_stage_and_exception(monkeypatch):
     with pytest.raises(TimeoutError) as caught:
         asyncio.run(client.connect_and_handshake())
     assert caught.value is error
-    assert "runner.wait_hello_response:timeout=10s" in warning.call_args.args[0]
+    assert "runner.wait_hello_response:timeout=30s" in warning.call_args.args[0]
     assert "secret-session-token" not in str(warning.call_args_list)
 
 

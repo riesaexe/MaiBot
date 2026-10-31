@@ -18,6 +18,7 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ListFieldEditor } from '@/components/ListFieldEditor'
+import { ChatStreamSelect } from '@/components/ChatStreamSelect'
 import { MultiSelect } from '@/components/ui/multi-select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { CodeEditor } from '@/components/CodeEditor'
@@ -195,6 +196,25 @@ function FieldRenderer({ field, value, onChange }: FieldRendererProps) {
 
   // 根据 ui_type 渲染不同的控件
   switch (field.ui_type) {
+    case 'chat-stream': {
+      const current = value ?? field.default
+      const multiple = field.type === 'array'
+      const selected = Array.isArray(current) ? current.map(String) : current ? [String(current)] : []
+      return (
+        <div className="space-y-2">
+          <Label>{label}</Label>
+          <ChatStreamSelect
+            value={selected}
+            onChange={ids => onChange(multiple ? ids : ids[0] ?? '')}
+            multiple={multiple}
+            disabled={field.disabled}
+            placeholder={placeholder}
+          />
+          {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
+        </div>
+      )
+    }
+
     case 'switch':
       return (
         <div className="flex items-center justify-between">
@@ -389,7 +409,7 @@ interface SectionRendererProps {
 }
 
 function getFieldGridClassName(field: ConfigFieldSchema): string {
-  if (field.ui_type === 'textarea' || field.ui_type === 'list' || field.ui_type === 'slider') {
+  if (field.ui_type === 'textarea' || field.ui_type === 'list' || field.ui_type === 'slider' || field.ui_type === 'chat-stream') {
     return 'lg:col-span-2'
   }
 
@@ -398,12 +418,14 @@ function getFieldGridClassName(field: ConfigFieldSchema): string {
 
 function SectionRenderer({ sectionName, section, config, onChange, initiallyExpanded = false }: SectionRendererProps) {
   const resolvedSectionName = section.name || sectionName
+  // SDK 把顶层标量配置归入 general 展示，实际值仍保存在配置根部。
+  const configPath = resolvedSectionName === 'general' && !getNestedRecord(config, 'general') ? '' : resolvedSectionName
   const [isOpen, setIsOpen] = useState(
     resolvedSectionName !== 'plugin' && (initiallyExpanded || !section.collapsed)
   )
   const { i18n } = useTranslation()
   const language = i18n.resolvedLanguage || i18n.language || 'zh'
-  const sectionConfig = getNestedRecord(config, resolvedSectionName)
+  const sectionConfig = configPath ? getNestedRecord(config, configPath) : config
   const title = resolveLocalizedText(section.title, language, sectionName, section.i18n, 'title')
   const description = resolveLocalizedText(
     section.description,
@@ -417,6 +439,13 @@ function SectionRenderer({ sectionName, section, config, onChange, initiallyExpa
   const sortedFields = Object.entries(section.fields)
     .filter(([, field]) => !field.hidden)
     .sort(([, a], [, b]) => (a.order ?? 0) - (b.order ?? 0))
+  const fieldGroups = new Map<string, typeof sortedFields>()
+  for (const entry of sortedFields) {
+    const group = resolveLocalizedText(entry[1].group, language, '', entry[1].i18n, 'group')
+    const fields = fieldGroups.get(group) ?? []
+    fields.push(entry)
+    fieldGroups.set(group, fields)
+  }
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
@@ -438,14 +467,21 @@ function SectionRenderer({ sectionName, section, config, onChange, initiallyExpa
         </CollapsibleTrigger>
         <CollapsibleContent>
           <CardContent className="grid grid-cols-1 gap-4 pt-0 lg:grid-cols-2">
-            {sortedFields.map(([fieldName, field]) => (
-              <div key={fieldName} className={getFieldGridClassName(field)}>
-                <FieldRenderer
-                  field={field}
-                  value={sectionConfig?.[fieldName]}
-                  onChange={(value) => onChange(resolvedSectionName, fieldName, value)}
-                  sectionName={resolvedSectionName}
-                />
+            {Array.from(fieldGroups, ([group, fields]) => (
+              <div key={group} className="space-y-3 lg:col-span-2">
+                {group && <h3 className="border-b pb-2 text-sm font-medium">{group}</h3>}
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {fields.map(([fieldName, field]) => (
+                    <div key={fieldName} className={getFieldGridClassName(field)}>
+                      <FieldRenderer
+                        field={field}
+                        value={sectionConfig?.[fieldName]}
+                        onChange={(value) => onChange(configPath, fieldName, value)}
+                        sectionName={resolvedSectionName}
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </CardContent>
@@ -2007,6 +2043,11 @@ function PluginConfigPageContent() {
                       <p className="text-muted-foreground line-clamp-2 text-sm leading-relaxed sm:truncate sm:leading-normal">
                         {plugin.manifest.description || '暂无描述'}
                       </p>
+                      {plugin.load_status === 'timed_out' && (
+                        <div role="status" className="rounded-md border border-amber-300 bg-amber-50/80 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/25 dark:text-amber-300">
+                          {plugin.load_error || '插件尚未完成加载，仍在后台等待；不会因加载超时停止整组插件。'}
+                        </div>
+                      )}
                       {pluginLoadFailed && (
                         <div className="flex min-w-0 flex-col gap-2 rounded-md border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/25 dark:text-red-300 sm:flex-row sm:items-center">
                           <div className="flex min-w-0 flex-1 items-start gap-1.5">

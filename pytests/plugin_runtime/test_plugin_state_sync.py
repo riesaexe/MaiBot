@@ -76,8 +76,8 @@ async def test_cold_enable_installs_dependencies_before_config_import(tmp_path, 
 async def test_snapshot_only_marks_plugins_in_their_loading_supervisor(tmp_path, monkeypatch):
     manager = PluginRuntimeManager()
     manager._started = True
-    extension = SimpleNamespace(_plugin_dirs=[tmp_path], is_loading=False)
-    core = SimpleNamespace(_plugin_dirs=[tmp_path], is_loading=True)
+    extension = SimpleNamespace(_plugin_dirs=[tmp_path], is_loading=False, startup_load_status="not_loaded", startup_load_reason="")
+    core = SimpleNamespace(_plugin_dirs=[tmp_path], is_loading=True, startup_load_status="loading", startup_load_reason="")
     manager._builtin_supervisor = core
     manager._third_party_supervisor = extension
     monkeypatch.setattr(manager, "_iter_discovered_plugin_paths", lambda dirs: iter([

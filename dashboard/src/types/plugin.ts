@@ -19,18 +19,18 @@ export interface HostApplication {
 
 export type PluginType =
   | 'adapter'
-  | 'chat'
-  | 'creative'
+  | 'tool'
   | 'provider'
   | 'management'
-  | 'search'
-  | 'knowledge'
+  | 'data'
   | 'media'
   | 'game'
-  | 'security'
-  | 'automation'
-  | 'extension'
+  | 'integration'
   | 'other'
+  | 'chat'
+  | 'creative'
+  | 'automation'
+  | 'deskpet'
 
 export interface PluginDisplayIcon {
   type: 'lucide' | 'emoji' | 'local'

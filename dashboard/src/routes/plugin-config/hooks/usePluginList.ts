@@ -299,7 +299,7 @@ export function usePluginList() {
   const isPluginLoadSuccess = (plugin: InstalledPlugin) =>
     plugin.load_status === 'success'
   const isPluginLoading = (plugin: InstalledPlugin) =>
-    plugin.load_status === 'loading' || plugin.load_status === 'stopping'
+    plugin.load_status === 'loading' || plugin.load_status === 'timed_out' || plugin.load_status === 'stopping'
   const isPluginOffline = (plugin: InstalledPlugin) =>
     !isPluginDisabled(plugin) && plugin.load_status === 'offline'
   const isPluginCircuitOpen = (plugin: InstalledPlugin) =>
@@ -326,6 +326,7 @@ export function usePluginList() {
   const disabledCount = plugins.filter(isPluginDisabled).length
   const loadSuccessCount = plugins.filter(isPluginLoadSuccess).length
   const loadingCount = plugins.filter(isPluginLoading).length
+  const timedOutCount = plugins.filter((plugin) => plugin.load_status === 'timed_out').length
   const offlineCount = plugins.filter(isPluginOffline).length
   const circuitOpenCount = plugins.filter(isPluginCircuitOpen).length
   const circuitActiveCount = plugins.filter(isPluginCircuitActive).length
@@ -334,7 +335,7 @@ export function usePluginList() {
   const showsCircuitSummary = circuitOpenCount > 0
   const modernLoadSummaryLabel = [
     `加载成功 ${loadSuccessCount} 个`,
-    `加载中 ${loadingCount} 个`,
+    `加载中 ${loadingCount} 个${timedOutCount > 0 ? `（其中超时 ${timedOutCount} 个，仍在等待）` : ''}`,
     offlineCount > 0 ? `已离线 ${offlineCount} 个` : '',
     showsCircuitSummary ? `熔断中 ${circuitOpenCount} 个` : '',
     `加载失败 ${loadFailedCount} 个`,
@@ -345,7 +346,7 @@ export function usePluginList() {
     `已安装 ${installedCount} 个插件`,
     `已启用 ${enabledCount} 个`,
     `已禁用 ${disabledCount} 个`,
-    `加载中 ${loadingCount} 个`,
+    `加载中 ${loadingCount} 个${timedOutCount > 0 ? `（其中超时 ${timedOutCount} 个，仍在等待）` : ''}`,
     offlineCount > 0 ? `已离线 ${offlineCount} 个` : '',
     showsCircuitSummary ? `熔断中 ${circuitOpenCount} 个` : '',
     `启动失败 ${loadFailedCount} 个`,
@@ -376,6 +377,14 @@ export function usePluginList() {
         dotClassName: 'bg-yellow-500',
         label: '半开测试',
         badgeClassName: 'border-yellow-600 text-yellow-700',
+        icon: 'warning' as const,
+      }
+    }
+    if (plugin.load_status === 'timed_out') {
+      return {
+        dotClassName: 'bg-amber-500',
+        label: '加载超时，仍在等待',
+        badgeClassName: 'border-amber-600 text-amber-700',
         icon: 'warning' as const,
       }
     }

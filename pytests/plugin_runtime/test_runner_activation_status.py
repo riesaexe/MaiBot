@@ -248,6 +248,9 @@ class _HostTransport:
     def register_method(self, method: str, handler: Any) -> None:
         self.handlers[method] = handler
 
+    async def send_event(self, method: str, **kwargs: Any) -> None:
+        assert method == "runner.startup_progress"
+
     async def disconnect(self) -> None:
         self.disconnected = True
 
