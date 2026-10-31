@@ -1337,7 +1337,6 @@ class MaisakaReasoningEngine:
                     previous_summary=previous_summary,
                     recent_messages=[message for message in final_history if not isinstance(message, ContextSummaryMessage)],
                     session_id=self._runtime.session_id,
-                    max_summary_chars=global_config.chat.context_compaction_summary_max_chars,
                 )
             except Exception:
                 logger.exception(f"{self._runtime.log_prefix} 上下文压缩失败，将直接裁切本批旧原文，不再重试本批内容")
