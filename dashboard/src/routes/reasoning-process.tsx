@@ -1,5 +1,5 @@
 import { useNavigate } from '@tanstack/react-router'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle,
@@ -24,6 +24,7 @@ import {
   Search,
   Timer,
   Trash2,
+  Upload,
 } from 'lucide-react'
 
 import {
@@ -57,6 +58,7 @@ import {
   findReasoningToolCallSource,
   getReasoningPromptFile,
   getReasoningPromptHtmlUrl,
+  importReasoningPrompt,
   listReasoningPromptFiles,
   listReasoningPromptStages,
   clearReasoningPromptStage,
@@ -159,11 +161,13 @@ function buildStageCategoryRows(stageCards: ReasoningPromptStageInfo[]): StageCa
   const learnerStages = takeMatchingStages(isLearnerStage)
   const llmErrorStages = takeNamedStages(LLM_ERROR_STAGE_NAMES)
   const removedStages = takeNamedStages(REMOVED_STAGE_NAMES)
+  const importedStages = takeNamedStages(['imported'])
   const otherStages = takeMatchingStages(() => true)
 
   return [
     { key: 'core', label: '主流程', items: coreStages },
     { key: 'learners', label: '学习器', items: learnerStages },
+    { key: 'imported', label: '导入', items: importedStages },
     { key: 'others', label: '其余', items: otherStages },
     { key: 'llm-errors', label: 'LLM 请求', items: llmErrorStages, collapsedByDefault: true },
     { key: 'removed', label: '不再使用', items: removedStages, collapsedByDefault: true },
@@ -532,6 +536,8 @@ export function ReasoningProcessPage({
   const [eraseNicknameOnExport, setEraseNicknameOnExport] = useState(true)
   const [toolCallRecords, setToolCallRecords] = useState<ReasoningToolCallRecord[]>([])
   const [toolCallSource, setToolCallSource] = useState<ReasoningToolCallRecord | null>(null)
+  const importInputRef = useRef<HTMLInputElement>(null)
+  const [importing, setImporting] = useState(false)
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const stageCards = useMemo(() => {
@@ -969,6 +975,38 @@ export function ReasoningProcessPage({
     }
   }
 
+  async function handleImportReasoning(file: File | undefined) {
+    if (!file) return
+    setImporting(true)
+    try {
+      const payload: unknown = JSON.parse(await file.text())
+      if (!isRecord(payload)) throw new Error('文件不是有效的推理记录 JSON')
+      const result = await importReasoningPrompt(payload)
+      setStage(result.stage)
+      setSession(result.session)
+      setActionFilter('')
+      setSearch('')
+      setPage(1)
+      setSelected(null)
+      setTargetStem(result.stem)
+      setBrowsingStage(true)
+      setRefreshKey((current) => current + 1)
+      toast({ title: '已导入推理记录' })
+    } catch (err) {
+      toast({ title: '导入失败', description: err instanceof Error ? err.message : '请检查 JSON 文件', variant: 'destructive' })
+    } finally {
+      setImporting(false)
+      if (importInputRef.current) importInputRef.current.value = ''
+    }
+  }
+
+  const renderImportButton = () => (
+    <Button variant="outline" size="sm" disabled={importing} onClick={() => importInputRef.current?.click()}>
+      {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+      导入推理
+    </Button>
+  )
+
   const updateReplayItem = (id: string, patch: Partial<EditableReplayItem>) => {
     setReplayItems((current) =>
       current.map((item) => (item.id === id ? { ...item, ...patch } : item))
@@ -1332,8 +1370,10 @@ export function ReasoningProcessPage({
       )}
       {toolbarPortal}
       {topbarActionsPortal}
+      <input ref={importInputRef} type="file" accept=".json,application/json" className="hidden" onChange={(event) => void handleImportReasoning(event.target.files?.[0])} />
       {embedded && !browsingStage && (
-        <div className="flex shrink-0 justify-end px-2 pt-2 sm:px-3">
+        <div className="flex shrink-0 justify-end gap-2 px-2 pt-2 sm:px-3">
+          {renderImportButton()}
           {renderRefreshButton('toolbar')}
         </div>
       )}
@@ -1384,6 +1424,7 @@ export function ReasoningProcessPage({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {renderReturnButton()}
+            {renderImportButton()}
             {renderRefreshButton()}
           </div>
         </div>
@@ -1549,6 +1590,7 @@ export function ReasoningProcessPage({
               data-reasoning-panel-footer="true"
               className="flex h-10 flex-shrink-0 items-center justify-between border-t px-2"
             >
+              {renderImportButton()}
               <Button
                 variant="outline"
                 size="sm"

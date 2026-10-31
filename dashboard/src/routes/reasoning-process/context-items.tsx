@@ -38,6 +38,7 @@ const STAGE_LABELS: Record<string, string> = {
   jargon_learner: '黑话抽取',
   jargon_learning_update: '黑话含义推断',
   llm_error: 'LLM 请求异常',
+  imported: '导入',
   planner: '规划器',
   replyer: '回复器',
   timing_gate: '时机判断',

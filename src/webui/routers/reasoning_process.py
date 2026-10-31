@@ -4,6 +4,7 @@ from html import unescape
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 import asyncio
 import base64
 import json
@@ -14,7 +15,6 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from json_repair import repair_json
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
 
@@ -22,6 +22,7 @@ from src.common.paths import get_instance_root
 from src.common.data_models.llm_service_data_models import LLMServiceRequest
 from src.common.database.database import get_db_session
 from src.common.database.database_model import ChatSession, Messages
+from src.common.llm_json import parse_llm_json
 from src.common.logger import get_logger
 from src.common.operation_timing import timed_operation
 from src.config.config import config_manager
@@ -1395,7 +1396,7 @@ def _extract_selected_expression_pairs(payload: Dict[str, Any]) -> Optional[List
     if not output:
         return None
     try:
-        result = json.loads(repair_json(output))
+        result = parse_llm_json(output, repair=True)
     except (TypeError, ValueError):
         return None
     selected_ids = result.get("selected_ids") if isinstance(result, dict) else None
@@ -2023,6 +2024,19 @@ def list_reasoning_prompt_stages():
         stages=[item.name for item in stage_infos],
         stage_infos=stage_infos,
     )
+
+
+@router.post("/import")
+def import_reasoning_prompt(payload: Dict[str, Any]):
+    """将单条结构化推理记录保存到独立的导入目录。"""
+    if not any(isinstance(payload.get(key), list) for key in ("request_items", "output_items", "messages")):
+        raise HTTPException(status_code=400, detail="文件不是有效的推理记录 JSON")
+
+    import_dir = PROMPT_LOG_ROOT / "imported" / "导入"
+    import_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{int(time.time() * 1000)}-{uuid4().hex}"
+    (import_dir / f"{stem}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"stage": "imported", "session": "导入", "stem": stem}
 
 
 @router.delete("/stages/{stage}", response_model=ReasoningPromptClearStageResponse)

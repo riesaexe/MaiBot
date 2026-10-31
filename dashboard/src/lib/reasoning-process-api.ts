@@ -235,6 +235,13 @@ export async function listReasoningPromptStages(): Promise<ReasoningPromptStages
   })
 }
 
+export async function importReasoningPrompt(payload: Record<string, unknown>): Promise<{ stage: string; session: string; stem: string }> {
+  return backendApi.post(`${API_BASE}/import`, {
+    body: payload,
+    errorMessage: '导入推理记录失败',
+  })
+}
+
 export async function clearReasoningPromptStage(
   stage: string
 ): Promise<ReasoningPromptClearStageResponse> {
