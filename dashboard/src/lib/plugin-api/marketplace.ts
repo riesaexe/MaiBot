@@ -1,4 +1,4 @@
-import type { PluginInfo, PluginReleaseCatalog, PluginType } from '@/types/plugin'
+import type { PluginInfo, PluginReleaseCatalog } from '@/types/plugin'
 
 import { ApiError, backendApi } from '@/lib/http'
 import { pluginProgressClient } from '@/lib/plugin-progress-client'
@@ -9,22 +9,7 @@ import type { GitStatus, MaimaiVersion } from './types'
  * 插件市场展示缓存
  */
 const PLUGIN_LIST_CACHE_TTL = 5 * 60 * 1000
-const PLUGIN_LIST_STORAGE_KEY = 'maibot-plugin-market-list-cache-v4'
-const PLUGIN_TYPES = new Set<PluginType>([
-  'adapter',
-  'chat',
-  'creative',
-  'provider',
-  'management',
-  'search',
-  'knowledge',
-  'media',
-  'game',
-  'security',
-  'automation',
-  'extension',
-  'other',
-])
+const PLUGIN_LIST_STORAGE_KEY = 'maibot-plugin-market-list-cache-v5'
 
 const pluginListCaches = new Map<boolean, { timestamp: number; result: PluginInfo[] }>()
 const pluginListRequests = new Map<boolean, Promise<PluginInfo[]>>()
@@ -81,6 +66,7 @@ interface PluginApiResponse {
     }
     keywords: string[]
     plugin_type?: string
+    type?: string
     display?: PluginInfo['manifest']['display']
     changelog?: string
     default_locale?: string
@@ -93,19 +79,6 @@ interface PluginApiResponse {
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
-}
-
-function normalizePluginType(value: unknown): PluginType {
-  if (typeof value !== 'string' || !value.trim()) {
-    return 'extension'
-  }
-
-  const normalizedValue = value.trim()
-  if (PLUGIN_TYPES.has(normalizedValue as PluginType)) {
-    return normalizedValue as PluginType
-  }
-
-  return 'other'
 }
 
 function normalizePluginManifest(manifest: PluginApiResponse['manifest']): PluginInfo['manifest'] {
@@ -126,7 +99,7 @@ function normalizePluginManifest(manifest: PluginApiResponse['manifest']): Plugi
     repository_url: repositoryUrl,
     urls: manifest.urls,
     keywords: manifest.keywords || [],
-    plugin_type: normalizePluginType(manifest.plugin_type),
+    plugin_type: normalizeOptionalString(manifest.plugin_type ?? manifest.type),
     display: manifest.display,
     changelog: normalizeOptionalString(manifest.changelog),
     default_locale: manifest.i18n?.default_locale || manifest.default_locale || 'zh-CN',

@@ -29,34 +29,35 @@ interface PluginCardProps {
   getIncompatibleReason: (plugin: PluginInfo) => string | null
 }
 
-function getRecentPluginActivity(plugin: PluginInfo): { timeLabel: string; action: string } | null {
+function getRecentPluginActivities(plugin: PluginInfo): Array<{ timeLabel: string; action: '发布' | '更新' }> {
   const parseTime = (value?: string) => value ? Date.parse(value) : NaN
   const releaseTimes = (plugin.releases?.versions ?? [])
     .filter((release) => !release.prerelease && !release.yanked)
     .map((release) => parseTime(release.published_at))
     .filter(Number.isFinite)
   const publishedTime = parseTime(plugin.published_at)
+  const updatedTime = parseTime(plugin.updated_at)
+  // 官方列表可能只包含最新版本，不能把唯一的版本时间当作首次发布时间。
   const firstPublishedTime = Number.isFinite(publishedTime)
     ? publishedTime
-    : releaseTimes.length > 0 ? Math.min(...releaseTimes) : NaN
-  const activityTimes = [firstPublishedTime, parseTime(plugin.updated_at), ...releaseTimes]
-    .filter(Number.isFinite)
-  if (activityTimes.length === 0) return null
+    : releaseTimes.length > 1 ? Math.min(...releaseTimes) : NaN
+  const updateTimes = [updatedTime, ...(Number.isFinite(firstPublishedTime) ? releaseTimes : [])]
+    .filter((time) => Number.isFinite(time) && (!Number.isFinite(firstPublishedTime) || time > firstPublishedTime))
+  const latestUpdateTime = updateTimes.length > 0 ? Math.max(...updateTimes) : NaN
 
-  // 首次发布时间之后的市场改动或正式版本发布都算更新，只展示最近七天的活动。
-  const latestTime = Math.max(...activityTimes)
-  const ageMinutes = (Date.now() - latestTime) / 60_000
-  if (ageMinutes < 0 || ageMinutes >= 7 * 24 * 60) return null
-
-  const timeLabel = ageMinutes >= 24 * 60
-    ? `${Math.floor(ageMinutes / (24 * 60))}天前`
-    : ageMinutes >= 60
-      ? `${Math.floor(ageMinutes / 60)}小时前`
-      : `${Math.floor(ageMinutes)}分钟前`
-  return {
-    timeLabel,
-    action: latestTime === firstPublishedTime ? '发布' : '更新',
-  }
+  return ([
+    { time: firstPublishedTime, action: '发布' as const },
+    { time: latestUpdateTime, action: '更新' as const },
+  ]).flatMap(({ time, action }) => {
+    const ageMinutes = (Date.now() - time) / 60_000
+    if (!Number.isFinite(ageMinutes) || ageMinutes < 0 || ageMinutes >= 7 * 24 * 60) return []
+    const timeLabel = ageMinutes >= 24 * 60
+      ? `${Math.floor(ageMinutes / (24 * 60))}天前`
+      : ageMinutes >= 60
+        ? `${Math.floor(ageMinutes / 60)}小时前`
+        : `${Math.floor(ageMinutes)}分钟前`
+    return [{ timeLabel, action }]
+  })
 }
 
 function getPluginGrowthRank(rank7d?: number | null, rank30d?: number | null): { rank: number; days: number } | null {
@@ -112,7 +113,7 @@ export const PluginCard = memo(function PluginCard({
   const isPluginOperating = loadProgress?.stage === 'loading'
     && loadProgress.operation !== 'fetch'
   const progressDetail = loadProgress ? getPluginProgressDetail(loadProgress) : null
-  const recentActivity = getRecentPluginActivity(plugin)
+  const recentActivities = getRecentPluginActivities(plugin)
   const downloadGrowth = getPluginGrowthRank(stats?.downloads_growth_rank_7d, stats?.downloads_growth_rank_30d)
   const likeGrowth = getPluginGrowthRank(stats?.likes_growth_rank_7d, stats?.likes_growth_rank_30d)
   // 下载与点赞只保留名次更靠前的一项；同名次优先短期榜，再优先下载榜。
@@ -127,7 +128,7 @@ export const PluginCard = memo(function PluginCard({
       key={plugin.id}
       data-plugin-market-card="true"
       data-plugin-installed={plugin.installed ? 'true' : undefined}
-      data-plugin-recent-activity={recentActivity || downloadGrowth || likeGrowth ? 'true' : undefined}
+      data-plugin-recent-activity={recentActivities.length > 0 || downloadGrowth || likeGrowth ? 'true' : undefined}
       className="relative isolate row-span-2 grid h-full min-w-0 cursor-pointer grid-cols-1 grid-rows-subgrid gap-y-0"
       onPointerEnter={measureTitleOverflow}
       onFocusCapture={measureTitleOverflow}
@@ -179,6 +180,7 @@ export const PluginCard = memo(function PluginCard({
               pluginId={plugin.id}
               manifest={plugin.manifest}
               installed={plugin.installed}
+              installedVersion={plugin.installed_version}
               marketplaceIconUrl={plugin.assets?.icon_64}
               className="absolute inset-0 h-full w-full rounded-md shadow-md"
               iconClassName="h-6 w-6 text-3xl"
@@ -217,8 +219,9 @@ export const PluginCard = memo(function PluginCard({
               <div data-plugin-card-author="true" className="min-w-0 truncate text-xs text-muted-foreground" title={plugin.manifest?.author?.name || 'Unknown'}>
                 {plugin.manifest?.author?.name || 'Unknown'}
               </div>
-              {recentActivity && (
+              {recentActivities.map((recentActivity) => (
                 <div
+                  key={recentActivity.action}
                   data-plugin-activity={recentActivity.action === '发布' ? 'publish' : 'update'}
                   className="relative shrink-0 pl-3 text-[11px] leading-tight text-muted-foreground"
                   title={`${recentActivity.timeLabel}${recentActivity.action}`}
@@ -226,7 +229,7 @@ export const PluginCard = memo(function PluginCard({
                   <span className={`absolute left-0 top-1/2 h-1.5 w-1.5 -translate-y-1/2 ${recentActivity.action === '发布' ? 'bg-emerald-500' : 'bg-orange-500'}`} aria-hidden="true" />
                   <span className="whitespace-nowrap">{recentActivity.timeLabel}{recentActivity.action}</span>
                 </div>
-              )}
+              ))}
             </div>
           </div>
         </div>

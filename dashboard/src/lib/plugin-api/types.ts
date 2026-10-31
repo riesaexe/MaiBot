@@ -56,7 +56,7 @@ export interface InstalledPlugin {
   loaded?: boolean
   /** 后端累计的实际运行秒数，不含禁用或停机时间。 */
   usage_seconds?: number
-  load_status?: 'success' | 'failed' | 'inactive' | 'disabled' | 'offline' | 'unknown' | 'loading' | 'stopping' | 'not_loaded' | 'stopped'
+  load_status?: 'success' | 'failed' | 'inactive' | 'disabled' | 'offline' | 'unknown' | 'loading' | 'timed_out' | 'stopping' | 'not_loaded' | 'stopped'
   load_error?: string
   circuit_status?: {
     state: 'open' | 'half_open'

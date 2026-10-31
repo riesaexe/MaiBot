@@ -50,7 +50,7 @@ import type {
   PluginLoadProgress,
   PluginProgressById,
 } from './types'
-import { clearPluginProgress, mergePluginProgress, PLUGIN_TYPE_OPTIONS } from './types'
+import { clearPluginProgress, getPluginType, mergePluginProgress, PLUGIN_TYPE_OPTIONS } from './types'
 import { PluginDetailPage } from '../plugin-detail'
 
 const PLUGIN_MARKET_COMPATIBLE_ONLY_KEY = 'plugins-market-compatible-only'
@@ -106,9 +106,10 @@ const readPluginMarketplaceViewState = (): PluginMarketplaceViewState => {
   }
 
   const parsed = JSON.parse(savedState) as Partial<PluginMarketplaceViewState>
-  const pluginTypeFilter = typeof parsed.pluginTypeFilter === 'string'
-    && (parsed.pluginTypeFilter === 'all' || PLUGIN_TYPE_OPTIONS.some(option => option.value === parsed.pluginTypeFilter))
-    ? parsed.pluginTypeFilter
+  const legacyFilters: Record<string, string> = { knowledge: 'data', entertainment: 'game', search: 'integration' }
+  const savedType = parsed.pluginTypeFilter ? (legacyFilters[parsed.pluginTypeFilter] ?? parsed.pluginTypeFilter) : 'all'
+  const pluginTypeFilter = savedType === 'all' || PLUGIN_TYPE_OPTIONS.some(option => option.value === savedType)
+    ? savedType
     : DEFAULT_PLUGIN_MARKET_VIEW_STATE.pluginTypeFilter
   const marketplaceSortBy = parsed.marketplaceSortBy
     && MARKETPLACE_SORT_KEYS.includes(parsed.marketplaceSortBy)
@@ -892,6 +893,21 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
     checkPluginCompatibility,
   ), [plugins, searchQuery, pluginTypeFilter, showCompatibleOnly, waitingForCompatibility, checkPluginCompatibility])
 
+  // 分类数量沿用搜索与兼容性筛选，但不受当前选中的分类影响。
+  const categoryCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    const matchingPlugins = waitingForCompatibility ? [] : filterMarketplacePlugins(
+      plugins,
+      { searchQuery, pluginTypeFilter: 'all', showCompatibleOnly },
+      checkPluginCompatibility,
+    )
+    for (const plugin of matchingPlugins) {
+      const type = getPluginType(plugin)
+      if (type) counts.set(type, (counts.get(type) ?? 0) + 1)
+    }
+    return { counts, total: matchingPlugins.length }
+  }, [plugins, searchQuery, showCompatibleOnly, waitingForCompatibility, checkPluginCompatibility])
+
   const marketplaceContent = (
     <ScrollArea
       className="h-full max-lg:h-auto max-lg:overflow-visible max-lg:[&>[data-dashboard-scrollbar]]:hidden"
@@ -965,17 +981,27 @@ function PluginMarketplacePageContent({ embedded }: Required<PluginMarketplacePa
                 <SelectTrigger
                   aria-label="类型筛选"
                   title="类型筛选"
-                  className="min-w-0 flex-1 gap-2 px-3 sm:w-12 sm:flex-none sm:justify-center sm:gap-1 sm:px-2"
+                  className="min-w-0 flex-1 gap-2 px-3 sm:w-auto sm:flex-none"
                 >
                   <Filter className="h-4 w-4 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate text-left sm:sr-only">
-                    <SelectValue placeholder="选择类型" />
+                  <span className="min-w-0 flex-1 truncate text-left">
+                    <SelectValue placeholder="选择类型">
+                      {pluginTypeFilter === 'all' ? '全部类型' : PLUGIN_TYPE_OPTIONS.find(option => option.value === pluginTypeFilter)?.label}
+                    </SelectValue>
                   </span>
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">全部类型</SelectItem>
+                  <SelectItem value="all" className="[&>span:last-child]:w-full">
+                    <span className="flex w-full items-center justify-between gap-4">
+                      <span>全部类型</span><span className="text-right tabular-nums text-muted-foreground">{categoryCounts.total}</span>
+                    </span>
+                  </SelectItem>
                   {PLUGIN_TYPE_OPTIONS.map(option => (
-                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    <SelectItem key={option.value} value={option.value} className="[&>span:last-child]:w-full">
+                      <span className="flex w-full items-center justify-between gap-4">
+                        <span>{option.label}</span><span className="text-right tabular-nums text-muted-foreground">{categoryCounts.counts.get(option.value) ?? 0}</span>
+                      </span>
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
