@@ -13,6 +13,7 @@ from src.chat.message_receive.message import SessionMessage
 from src.common.data_models.message_component_data_model import (
     AtComponent, BaseMessageComponentModel, ImageComponent, MessageSequence, TextComponent,
 )
+from src.common.llm_json import validate_llm_json
 from src.common.logger import get_logger
 from src.common.prompt_i18n import load_prompt
 from src.config.config import global_config
@@ -242,6 +243,6 @@ async def generate_reply_supplement(
     logger.info(f"回复补充器缓存: session={session_id} {metadata}")
     if result.tool_calls or result.native_tool_calls:
         raise ValueError("回复补充器不得调用工具")
-    plan = ReplySupplementPlan.model_validate_json(result.response)
+    plan = validate_llm_json(result.response, ReplySupplementPlan)
     metadata["plan"] = plan.model_dump()
     return await resolve_supplement(plan, resources, metadata)
