@@ -13,6 +13,7 @@ from src.chat.utils.utils import is_bot_self
 from src.cli.maisaka_cli_sender import CLI_PLATFORM_NAME, render_cli_message
 from src.common.data_models.message_component_data_model import TextComponent
 from src.common.data_models.reply_generation_data_models import ReplyGenerationResult, build_reply_monitor_detail
+from src.common.llm_json import parse_llm_json
 from src.common.logger import get_logger
 from src.config import config as config_module
 from src.core.tooling import ToolAvailabilityContext, ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
@@ -21,6 +22,7 @@ from src.maisaka.context.message_adapter import build_visible_text_from_sequence
 from src.maisaka.context.message_id_alias import to_display_message_id
 from src.maisaka.context.messages import LLMContextMessage, SessionBackedMessage
 from src.maisaka.context.planner_messages import extract_quote_ids_from_message_sequence
+from src.plugin_runtime.host.hook_dispatcher import HookAbortedError, build_hook_abort_tool_result
 from src.plugin_runtime.host.message_utils import PluginMessageUtils
 from src.plugin_runtime.host.reply_extensions import ReplyExtensionExecution, build_reply_extensions_schema
 from src.services import send_service
@@ -53,7 +55,7 @@ def _normalize_reply_arguments(raw_arguments: dict[str, Any]) -> tuple[dict[str,
         )
 
     try:
-        parsed_arguments = json.loads(wrapped_arguments)
+        parsed_arguments = parse_llm_json(wrapped_arguments)
     except json.JSONDecodeError as exc:
         return raw_arguments, f"reply 工具参数结构错误：顶层 `arguments` 不是有效的 JSON 对象：{exc.msg}。"
 
@@ -99,6 +101,7 @@ async def _invoke_before_post_process_hook(
         reply_tool_args=dict(reply_tool_args),
         **post_process_options,
     )
+    before_post_process_result.raise_if_aborted()
     before_post_process_kwargs = before_post_process_result.kwargs
     if "response" in before_post_process_kwargs:
         reply_text = str(before_post_process_kwargs["response"] or "").strip()
@@ -253,6 +256,27 @@ def _build_monitor_metadata(reply_result: ReplyGenerationResult, reply_id: str =
     if isinstance(monitor_detail, dict):
         metadata["monitor_detail"] = monitor_detail
     return metadata
+
+
+def _build_reply_failure(
+    tool_ctx: BuiltinToolRuntimeContext,
+    target_message_id: str,
+    error_code: str,
+    reason: str,
+    metadata: Dict[str, Any],
+    hook_abort: Optional[Dict[str, Any]] = None,
+) -> ToolExecutionResult:
+    """统一向 Planner 反馈回复失败类型；主动拦截同时携带来源和原因。"""
+    content: Dict[str, Any] = {"msg_id": target_message_id, "error_code": error_code, "reason": reason}
+    if hook_abort is not None:
+        content["hook_abort"] = hook_abort
+    if "send_results" in metadata:
+        content["sent_message_ids"] = metadata["sent_message_ids"]
+        content["send_results"] = metadata["send_results"]
+    if hook_abort is not None:
+        return build_hook_abort_tool_result("reply", hook_abort, structured_content=content, metadata=metadata)
+    content["message"] = reason
+    return tool_ctx.build_failure_result("reply", reason, structured_content=content, metadata=metadata)
 
 
 def _build_send_result(
@@ -491,8 +515,6 @@ async def execute_reply(
         )
 
     replyer_chat_history = list(tool_ctx.runtime._chat_history)
-    if config_module.global_config.debug.replyer_retro_prompt:
-        replyer_chat_history = await tool_ctx.runtime.build_retro_reply_history()
     # 并行编排的引用目标尚未确定，不能把请求快照的最后一条消息强制指定为正文回复对象。
     previous_target_reply = (
         _find_recent_reply_to_target(replyer_chat_history, target_message_id) if supplement_runner is None else ""
@@ -507,6 +529,7 @@ async def execute_reply(
             stream_id=tool_ctx.runtime.session_id,
             reply_message=target_message if supplement_runner is None else None,
             chat_history=replyer_chat_history,
+            retro_history_builder=tool_ctx.runtime.build_retro_reply_history,
             image_recognition_refresher=lambda history: (
                 tool_ctx.runtime._reasoning_engine._refresh_chat_history_visual_placeholders(
                     chat_history=history,
@@ -553,10 +576,11 @@ async def execute_reply(
             f"{tool_ctx.runtime.log_prefix} 回复生成器返回空文本: "
             f"目标消息编号={target_message_id} 错误信息={reply_result.error_message!r}"
         )
-        return tool_ctx.build_failure_result(
-            "reply",
-            "生成可见回复失败。",
-            metadata=reply_metadata,
+        hook_abort = reply_result.error_details.get("hook_abort")
+        return _build_reply_failure(
+            tool_ctx, target_message_id, reply_result.error_code or "generation_failed",
+            hook_abort["reason"] if hook_abort is not None else reply_result.error_message,
+            reply_metadata, hook_abort,
         )
 
     if supplement is not None:
@@ -576,6 +600,11 @@ async def execute_reply(
             target_message_id,
             reply_tool_args,
         )
+    except HookAbortedError as exc:
+        return build_hook_abort_tool_result(
+            "reply", exc.to_dict(), structured_content={"msg_id": target_message_id},
+            metadata=_build_monitor_metadata(reply_result, extension_execution.reply_id),
+        )
     except Exception as exc:
         logger.warning(f"{tool_ctx.runtime.log_prefix} 回复文本后处理前 Hook 调用失败，将使用默认策略: {exc}")
         post_process_options = {
@@ -587,10 +616,9 @@ async def execute_reply(
     if not reply_text:
         reply_result.completion.response_text = ""
         reply_result.monitor_detail = build_reply_monitor_detail(reply_result)
-        return tool_ctx.build_failure_result(
-            "reply",
-            "回复文本后处理前 Hook 返回了空回复。",
-            metadata=_build_monitor_metadata(reply_result, extension_execution.reply_id),
+        return _build_reply_failure(
+            tool_ctx, target_message_id, "plugin_empty_response", "回复文本后处理前 Hook 将回复正文修改为空。",
+            _build_monitor_metadata(reply_result, extension_execution.reply_id),
         )
 
     try:
@@ -715,6 +743,7 @@ async def execute_reply(
                     typing=index > 0,
                     sync_to_maisaka_history=True,
                     maisaka_source_kind="guided_reply",
+                    raise_on_hook_abort=True,
                 )
                 sent = sent_message is not None
                 if not sent:
@@ -740,6 +769,13 @@ async def execute_reply(
                     )
                 )
                 previous_sent_message = sent_message
+    except HookAbortedError as exc:
+        send_results.append(
+            _build_send_result(index=index, segment=segment, set_quote=segment_set_quote, success=False)
+        )
+        return _build_reply_failure(
+            tool_ctx, target_message_id, "plugin_aborted", exc.reason, reply_metadata, exc.to_dict(),
+        )
     except Exception:
         logger.exception(f"{tool_ctx.runtime.log_prefix} 发送文字消息时发生异常，目标消息编号={target_message_id}")
         return tool_ctx.build_failure_result(
