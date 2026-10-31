@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { Download, Plus, Wrench } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { useTheme } from '@/components/use-theme'
 import { useToast } from '@/hooks/use-toast'
 import {
   clearPersonalityImport, parsePersonalityImport, PERSONALITY_IMPORT_EVENT, PERSONALITY_IMPORT_EXAMPLE,
@@ -35,7 +37,9 @@ export function PersonalityProfiles({ values, onChange }: {
   const [draft, setDraft] = useState<Profile | null>(null)
   const [originalName, setOriginalName] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmMarket, setConfirmMarket] = useState(false)
   const { toast } = useToast()
+  const { themeConfig, resolvedTheme } = useTheme()
   const profiles = (values.profiles ?? []) as Profile[]
   const selected = profiles.find((profile) => profile.name === values.selected_profile)
 
@@ -127,6 +131,16 @@ export function PersonalityProfiles({ values, onChange }: {
     setConfirmDelete(false)
   }
 
+  const openMarket = () => {
+    const url = new URL('https://maiprompt.top/')
+    url.hash = new URLSearchParams({
+      'maibot-webui-origin': window.location.origin,
+      appearance: themeConfig.dashboardStyle,
+      theme: resolvedTheme,
+    }).toString()
+    window.open(url.href, '_blank', 'noopener,noreferrer')
+  }
+
   return (
     <>
       <div className="flex min-w-0 items-center gap-2">
@@ -161,6 +175,7 @@ export function PersonalityProfiles({ values, onChange }: {
           <DialogBody>
             <div className="space-y-4">
               {panel === 'import' && <div className="space-y-3">
+                <Button type="button" size="sm" variant="outline" onClick={() => setConfirmMarket(true)}>浏览人设市场</Button>
                 <div className="flex items-center justify-between gap-2">
                   <Label htmlFor="personality-import-text">人设 JSON</Label>
                   <Button type="button" size="sm" variant="outline" onClick={() => setImportText(PERSONALITY_IMPORT_EXAMPLE)}>填入格式示例</Button>
@@ -218,6 +233,20 @@ export function PersonalityProfiles({ values, onChange }: {
           </div>}
         </DialogContent>
       </Dialog>
+      <AlertDialog open={confirmMarket} onOpenChange={setConfirmMarket}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>前往人设市场</AlertDialogTitle>
+            <AlertDialogDescription>
+              即将打开社区提供的人设市场 maiprompt.top。网站将获得当前 WebUI 的访问地址及界面风格、明暗模式，以便返回导入人设并协调界面外观。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={openMarket}>确认前往</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }
