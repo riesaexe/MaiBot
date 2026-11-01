@@ -167,20 +167,16 @@ export function PersonalityProfiles({ values, onChange }: {
       </div>
 
       <Dialog open={panel !== null} onOpenChange={(open) => { if (!open) closePanel() }}>
-        <DialogContent className="[--dialog-width:44rem]">
+        <DialogContent className="[--dialog-width:44rem]" {...(panel === 'import' ? { 'aria-describedby': undefined } : {})}>
           <DialogHeader>
             <DialogTitle>{panel === 'import' ? '导入人设' : panel === 'create' ? '新建人设' : '管理人设'}</DialogTitle>
-            <DialogDescription>{panel === 'import' ? '粘贴 maibot.personality v1 JSON，解析后可继续编辑并确认保存。' : panel === 'create' ? '编辑完成后保存到人设库，可在下拉框中切换。' : '选择人设查看或修改，保存当前使用的人设会同步生效。'}</DialogDescription>
+            {panel !== 'import' && <DialogDescription>{panel === 'create' ? '编辑完成后保存到人设库，可在下拉框中切换。' : '选择人设查看或修改，保存当前使用的人设会同步生效。'}</DialogDescription>}
           </DialogHeader>
           <DialogBody>
             <div className="space-y-4">
               {panel === 'import' && <div className="space-y-3">
                 <Button type="button" size="sm" variant="outline" onClick={() => setConfirmMarket(true)}>浏览人设市场</Button>
-                <div className="flex items-center justify-between gap-2">
-                  <Label htmlFor="personality-import-text">人设 JSON</Label>
-                  <Button type="button" size="sm" variant="outline" onClick={() => setImportText(PERSONALITY_IMPORT_EXAMPLE)}>填入格式示例</Button>
-                </div>
-                <Textarea id="personality-import-text" rows={12} value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={PERSONALITY_IMPORT_EXAMPLE} />
+                <Textarea id="personality-import-text" aria-label="人设 JSON" rows={12} value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={PERSONALITY_IMPORT_EXAMPLE} />
                 {imported.error && <p role="alert" className="text-sm text-destructive">{imported.error}</p>}
                 {imported.profile && <div className="space-y-2 rounded-md border p-3">
                   <p className="font-medium">已解析：{imported.profile.name}</p>
@@ -238,7 +234,8 @@ export function PersonalityProfiles({ values, onChange }: {
           <AlertDialogHeader>
             <AlertDialogTitle>前往人设市场</AlertDialogTitle>
             <AlertDialogDescription>
-              即将打开社区提供的人设市场 maiprompt.top。网站将获得当前 WebUI 的访问地址及界面风格、明暗模式，以便返回导入人设并协调界面外观。
+              即将打开社区提供的人设市场！你可以自由分享和使用大家的人设。如遇到问题，请提交 issue 至{' '}
+              <a href="https://github.com/Natural-Selectionn/maibot-prompt-market" target="_blank" rel="noopener noreferrer" className="underline">https://github.com/Natural-Selectionn/maibot-prompt-market</a>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

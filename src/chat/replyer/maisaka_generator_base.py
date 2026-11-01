@@ -568,12 +568,17 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
 
     @staticmethod
     def _build_reply_reference_message(reply_reason: str, reply_reference: str) -> str:
-        """有 reply reference 时只使用参考，否则使用 Planner 正文。"""
+        """有 reply reference 时只使用参考，否则使用 Planner 正文，并标注为当前想法。"""
 
-        normalized_reference = reply_reference.strip()
-        if normalized_reference:
-            return normalized_reference
-        return reply_reason.strip()
+        thought = reply_reference.strip() or reply_reason.strip()
+        if not thought:
+            return ""
+        locale = BaseMaisakaReplyGenerator._get_prompt_locale()
+        if locale.startswith("en"):
+            return f'Current thought:\n"{thought}"'
+        if locale.startswith("ja"):
+            return f"現在の考え：\n「{thought}」"
+        return f"当前想法：\n“{thought}”"
 
     def _build_final_user_message(
         self,

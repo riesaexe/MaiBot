@@ -404,11 +404,13 @@ class EmojiManager:
 
         logger.info(f"表情包不存在于数据库中，准备缓存新表情包，哈希值: {hash_str}")
         tmp_file_path = EMOJI_DIR / f"{hash_str}.tmp"
-        with tmp_file_path.open("wb") as file:
-            file.write(emoji_bytes)
+        await asyncio.to_thread(tmp_file_path.write_bytes, emoji_bytes)
 
         emoji = MaiEmoji(full_path=tmp_file_path, image_bytes=emoji_bytes)
-        await emoji.calculate_hash_format()
+        if not await emoji.calculate_hash_format():
+            # 格式识别失败的临时文件不能进入数据库，也不能留给维护任务反复注册。
+            await asyncio.to_thread(tmp_file_path.unlink, missing_ok=True)
+            raise ValueError(f"表情包格式识别失败，无法缓存: {tmp_file_path}")
 
         try:
             with get_db_session() as session:
@@ -1176,6 +1178,9 @@ class EmojiManager:
                             known_paths.add(record_path)
                 logger.info("[emoji_maintenance] Scanning data/emoji for new emojis...")
                 for emoji_file in EMOJI_DIR.iterdir():
+                    # .tmp 由缓存流程管理，可能尚未完成写入或格式识别。
+                    if emoji_file.suffix.lower() == ".tmp":
+                        continue
                     if not emoji_file.is_file():
                         continue
                     resolved_file = emoji_file.absolute().resolve()

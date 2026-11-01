@@ -360,6 +360,9 @@ class RetroReplyPromptMixin:
         """按旧版的块顺序准备模板占位符内容。"""
 
         combined_reference = self._build_reply_reference_message(reply_reason, reply_reference)
+        reply_target_block = self._build_retro_reply_target_block(reply_message, chat_history)
+        if reply_target_block:
+            reply_target_block += "." if self._get_prompt_locale().startswith("en") else "。"
         # 旧版按概率用备选表达风格整体替换人设里的表达风格，而不是追加一条风格消息
         reply_style = self._select_temporary_reply_style() or self._select_reply_style()
         return {
@@ -372,7 +375,7 @@ class RetroReplyPromptMixin:
             "extra_info_block": self._build_retro_extra_info_block(reply_requirements),
             "dialogue_prompt": self._build_retro_dialogue_block(chat_history),
             "time_block": f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "reply_target_block": self._build_retro_reply_target_block(reply_message, chat_history),
+            "reply_target_block": reply_target_block,
             "planner_reasoning": combined_reference,
             # Mai Replier 对齐训练分布：关键词反应提示（"人机"否定/定型文模板等）
             # 在训练数据中不存在，线上注入属训练外成分。Mai Replier 路径跳过。
