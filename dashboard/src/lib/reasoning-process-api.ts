@@ -291,6 +291,18 @@ export interface ReasoningToolCallRecordsResponse {
   records: ReasoningToolCallRecord[]
 }
 
+export async function listRelatedReasoningRecords(params: {
+  session: string
+  stage: string
+  stem: string
+}): Promise<ReasoningToolCallRecordsResponse> {
+  return backendApi.get<ReasoningToolCallRecordsResponse>(`${API_BASE}/related-records`, {
+    query: params,
+    cache: 'no-store',
+    errorMessage: '加载关联步骤失败',
+  })
+}
+
 /** 查找一次请求输出的工具调用里，哪些工具（如 reply）留有自己的推理过程记录。 */
 export async function findReasoningToolCallRecords(params: {
   session: string
