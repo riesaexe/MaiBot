@@ -811,6 +811,7 @@ def _collect_installed_plugins(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "disabled": entry.enabled is False,
             "loaded": load_status == "success",
             "load_status": load_status,
+            "status_badges": snapshot.get("status_badges", {}).get(plugin_id, []) if load_status == "success" else [],
             "usage_seconds": snapshot["usage_seconds"].get(plugin_id, 0.0),
             "load_error": load_error if load_status in {"failed", "timed_out"} else "",
             "circuit_status": snapshot["circuit_statuses"].get(plugin_id),

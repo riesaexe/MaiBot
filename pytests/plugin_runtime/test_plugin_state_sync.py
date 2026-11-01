@@ -8,6 +8,7 @@ import pytest
 
 from src.config.file_watcher import FileChange
 from src.plugin_runtime.integration import PluginRuntimeManager
+from src.plugin_runtime.host.status_badges import RuntimeStatusBadges
 from src.plugin_runtime.plugin_catalog import PluginCatalogEntry
 from src.plugin_runtime.protocol.envelope import InspectPluginConfigResultPayload
 from src.plugin_runtime.runner.manifest_validator import ManifestValidator
@@ -79,6 +80,8 @@ async def test_snapshot_only_marks_plugins_in_their_loading_supervisor(tmp_path,
     manager._started = True
     extension = SimpleNamespace(group_name="third_party", is_loading=False, startup_load_status="not_loaded", startup_load_reason="")
     core = SimpleNamespace(group_name="builtin", is_loading=True, startup_load_status="loading", startup_load_reason="")
+    extension.runtime_status_badges = RuntimeStatusBadges(lambda: None)
+    core.runtime_status_badges = RuntimeStatusBadges(lambda: None)
     manager._builtin_supervisor = core
     manager._third_party_supervisor = extension
     manager._plugin_catalog._entries = {

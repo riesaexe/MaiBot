@@ -92,6 +92,7 @@ from .hook_spec_registry import HookSpecRegistry
 from .logger_bridge import RunnerLogBridge
 from .message_gateway import MessageGateway
 from .rpc_server import RPCServer
+from .status_badges import RuntimeStatusBadges
 
 if TYPE_CHECKING:
     from src.chat.message_receive.message import SessionMessage
@@ -199,6 +200,7 @@ class PluginRunnerSupervisor:
         # 注册早于 on_load 完成；只在 Runner 确认加载成功后才开始累计使用时长。
         self._usage_loaded_plugin_ids: Set[str] = set()
         self._message_gateway_states: Dict[str, Dict[str, _MessageGatewayRuntimeState]] = {}
+        self.runtime_status_badges = RuntimeStatusBadges(self._notify_status_changed)
         self._external_available_plugins: Dict[str, str] = {}
         self._blocked_plugin_reasons: Dict[str, str] = {}
         self._runner_ready_events: asyncio.Event = asyncio.Event()
@@ -328,6 +330,7 @@ class PluginRunnerSupervisor:
     def _handle_usage_connection_lost(self) -> None:
         """断连时立即停止累计，避免把等待健康检查和重启的间隔算作使用时长。"""
         self._usage_loaded_plugin_ids.clear()
+        self.runtime_status_badges.clear()
         self._notify_status_changed()
 
     def get_plugin_config_error(self, plugin_id: str) -> str:
@@ -478,6 +481,8 @@ class PluginRunnerSupervisor:
         """从最近一次 Runner 加载状态中移除已卸载插件。"""
 
         unloaded_set = set(unloaded_plugins)
+        for plugin_id in unloaded_set:
+            self.runtime_status_badges.remove(plugin_id)
         self._usage_loaded_plugin_ids.difference_update(unloaded_set)
         self._plugin_recovery_targets.difference_update(unloaded_set)
         self._runner_load_result = RunnerReadyPayload(
@@ -1349,6 +1354,7 @@ class PluginRunnerSupervisor:
         self._usage_loaded_plugin_ids.discard(payload.plugin_id)
         await self._unregister_all_message_gateway_drivers_for_plugin(payload.plugin_id)
         self._message_gateway_states.pop(payload.plugin_id, None)
+        self.runtime_status_badges.remove(payload.plugin_id)
         self._notify_status_changed()
 
         return envelope.make_response(
@@ -2375,6 +2381,7 @@ class PluginRunnerSupervisor:
         self._registered_plugins.clear()
         self._usage_loaded_plugin_ids.clear()
         self._message_gateway_states.clear()
+        self.runtime_status_badges.clear()
         self._runner_ready_events = asyncio.Event()
         self._runner_load_result = RunnerReadyPayload()
         self._startup_pending_plugins.clear()

@@ -262,7 +262,14 @@ class PluginRuntimeManager(
         if not self._started and not any(supervisor.is_loading for supervisor in supervisors):
             statuses = {plugin_id: "failed" if status == "failed" else "stopped" for plugin_id, status in statuses.items()}
         statuses.update(self._plugin_transitions)
+        status_badges = {
+            plugin_id: badges
+            for supervisor in supervisors
+            for plugin_id, badges in supervisor.runtime_status_badges.snapshot().items()
+            if statuses.get(plugin_id) == "success"
+        }
         return {"statuses": statuses, "failure_reasons": reasons,
+                "status_badges": status_badges,
                 "circuit_statuses": self.get_plugin_circuit_statuses(), "running": self._started,
                 "usage_seconds": self.get_plugin_usage_seconds(),
                 "plugins": tuple(entry for entry in entries if not entry.builtin)}
