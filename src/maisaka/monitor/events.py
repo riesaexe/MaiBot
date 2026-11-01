@@ -225,12 +225,15 @@ def _serialize_tool_results(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     serialized_tools: List[Dict[str, Any]] = []
     for tool in tools:
         serialized_tool = {
+            **({"session_id": str(tool["session_id"]), "session_name": str(tool.get("session_name", ""))}
+               if tool.get("session_id") else {}),
             "tool_call_id": str(tool.get("tool_call_id", "")),
             "tool_name": str(tool.get("tool_name", "")),
             "tool_args": _normalize_payload_value(tool.get("tool_args", {})),
             "tool_call_source": str(tool.get("tool_call_source", "")),
             "tool_call_source_label": str(tool.get("tool_call_source_label", "")),
             "success": bool(tool.get("success", False)),
+            "error_message": str(tool.get("error_message", "")),
             "stop_after_execution": bool(tool.get("stop_after_execution", False)),
             "duration_ms": float(tool.get("duration_ms", 0.0) or 0.0),
             "summary": str(tool.get("summary", "")),
@@ -334,11 +337,13 @@ def _serialize_planner_block(
     prompt_cache_hit_tokens: Optional[int] = None,
     prompt_cache_miss_tokens: Optional[int] = None,
     model_name: Optional[str] = None,
+    reasoning: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """标准化 planner 结果区块。"""
 
     if (
         content is None
+        and reasoning is None
         and tool_calls is None
         and native_tool_calls is None
         and prompt_tokens is None
@@ -352,6 +357,7 @@ def _serialize_planner_block(
 
     return {
         "content": content,
+        "reasoning": reasoning,
         "model_name": model_name,
         "tool_calls": _serialize_tool_calls_from_objects(list(tool_calls or [])),
         "native_tool_calls": _serialize_native_tool_calls(list(native_tool_calls or [])),
@@ -630,6 +636,7 @@ async def emit_planner_snapshot(
     planner_selected_history_count: Optional[int],
     planner_tool_count: Optional[int],
     planner_content: Optional[str],
+    planner_reasoning: Optional[str] = None,
     planner_tool_calls: Optional[List[Any]],
     planner_native_tool_calls: Optional[List[Any]],
     planner_prompt_tokens: Optional[int],
@@ -650,10 +657,14 @@ async def emit_planner_snapshot(
     end_reason: str = "",
     end_detail: str = "",
     active_tool_call_id: str = "",
+    focus_scope_id: str = "",
+    focus_session_ids: Optional[List[str]] = None,
 ) -> None:
     """广播 Planner 过程或结束时的快照。"""
 
     await _broadcast(event_type, {
+        **({"focus_scope_id": focus_scope_id, "focus_session_ids": list(focus_session_ids or [])}
+           if focus_scope_id else {}),
         "session_id": session_id,
         "cycle_id": cycle_id,
         "run_id": run_id,
@@ -678,6 +689,7 @@ async def emit_planner_snapshot(
             planner_prompt_cache_hit_tokens,
             planner_prompt_cache_miss_tokens,
             model_name=planner_model_name,
+            reasoning=planner_reasoning,
         ),
         "tools": _serialize_tool_results(list(tools or [])),
         "active_tool_call_id": active_tool_call_id,

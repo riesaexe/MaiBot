@@ -2,7 +2,7 @@
 
 from html import unescape
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 import asyncio
 import base64
@@ -14,6 +14,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from json_repair import repair_json
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
 
@@ -26,11 +27,13 @@ from src.common.operation_timing import timed_operation
 from src.config.config import config_manager
 from src.llm_models.payload_content.context_item import CONTEXT_ITEM_SCHEMA_VERSION, ContextItem
 from src.llm_models.payload_content.context_protocol import ContextProtocolMode, validate_context_items
-from src.llm_models.request_snapshot import (
+from src.llm_models.payload_content.context_snapshot import (
     deserialize_context_item_snapshot,
+    serialize_context_item_snapshot,
+)
+from src.llm_models.request_snapshot import (
     read_request_snapshot,
     serialize_generation_attempt,
-    serialize_context_item_snapshot,
 )
 from src.maisaka.display.prompt_preview_logger import PromptPreviewLogger
 from src.services.llm_service import generate as generate_llm_response
@@ -237,6 +240,11 @@ class ReasoningPromptSessionInfo(BaseModel):
     matched_current_account: bool = False
 
 
+class SelectedExpressionPair(BaseModel):
+    situation: str
+    style: str
+
+
 class ReasoningPromptFile(BaseModel):
     """推理过程日志条目。"""
 
@@ -253,6 +261,7 @@ class ReasoningPromptFile(BaseModel):
     html_path: str | None = None
     json_path: str | None = None
     output_preview: str | None = None
+    selected_expressions: Optional[List[SelectedExpressionPair]] = None
     action_preview: str | None = None
     display_title: str | None = None
     related_json_paths: list[str] = Field(default_factory=list)
@@ -392,18 +401,19 @@ def _latest_replyer_expressions(session_id: str) -> tuple[list[str], int | None]
 
 @router.get("/active-context", response_model=ChatActiveContextResponse)
 def get_chat_active_context(session_id: str = Query(..., min_length=1)):
-    """读取运行中聊天流保留的回想、黑话，以及可用表达方式。"""
+    """读取运行中聊天流的滚动状态摘要、黑话，以及可用表达方式。"""
 
     from src.chat.heart_flow.heartflow_manager import heartflow_manager
     from src.maisaka.context.messages import ReferenceMessage, ReferenceMessageType
-    from src.maisaka.memory.mid_term import is_mid_term_memory_message
+    from src.maisaka.context.compaction import ContextSummaryMessage
 
     chat_manager = _get_chat_manager()
     if chat_manager.get_existing_session_by_session_id(session_id) is None:
         raise HTTPException(status_code=404, detail="聊天流不存在")
     runtime = heartflow_manager.heartflow_chat_list.get(session_id)
     history = list(runtime._chat_history) if runtime is not None else []
-    memory = [message.visible_text for message in history if is_mid_term_memory_message(message)]
+    summary_history = runtime._focus_group.history if runtime is not None and runtime._focus_group is not None else history
+    memory = [message.processed_plain_text for message in summary_history if isinstance(message, ContextSummaryMessage)]
     jargon_by_name: dict[str, str] = {}
     for message in history:
         if isinstance(message, ReferenceMessage) and message.reference_type == ReferenceMessageType.JARGON:
@@ -1107,8 +1117,10 @@ def _resolve_replay_image_path(raw_path: str) -> Path:
     resolved_path = candidate.resolve()
     if not _is_path_in_roots(resolved_path, REPLAY_IMAGE_ROOTS):
         raise ValueError(f"图片引用路径不在允许目录内: {normalized_path}")
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"图片引用文件不存在: {normalized_path}")
     if not resolved_path.is_file():
-        raise ValueError(f"图片引用文件不存在: {normalized_path}")
+        raise ValueError(f"图片引用不是文件: {normalized_path}")
     return resolved_path
 
 
@@ -1196,7 +1208,11 @@ def _rehydrate_replay_content(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
 
-    image_part = _rehydrate_replay_image_part(value)
+    try:
+        image_part = _rehydrate_replay_image_part(value)
+    except FileNotFoundError:
+        # 导入记录可能不包含原图；保留图片位置，不阻断其余上下文的重放。
+        return {"type": "text", "text": "[图片]"}
     if image_part is not None:
         return image_part
 
@@ -1371,6 +1387,49 @@ def _extract_output_text_from_json_payload(payload: dict[str, Any]) -> str | Non
 
 def _extract_output_preview_from_json(file_path: Path, max_chars: int = 160) -> str | None:
     return _extract_output_preview_from_json_payload(_load_prompt_json(file_path), max_chars=max_chars)
+
+
+def _extract_selected_expression_pairs(payload: Dict[str, Any]) -> Optional[List[SelectedExpressionPair]]:
+    """使用当次请求的候选快照还原表达对，避免查询当前表达库导致历史内容漂移。"""
+    output = _extract_output_text_from_json_payload(payload)
+    if not output:
+        return None
+    try:
+        result = json.loads(repair_json(output))
+    except (TypeError, ValueError):
+        return None
+    selected_ids = result.get("selected_ids") if isinstance(result, dict) else None
+    if not isinstance(selected_ids, list):
+        return None
+
+    candidates: Dict[int, SelectedExpressionPair] = {}
+    for item in payload.get("request_items", []):
+        if not isinstance(item, dict) or item.get("item_type") != "SystemMessageItem":
+            continue
+        text = "\n".join(
+            part["text"] for part in item.get("parts", [])
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+        # 候选内容可以跨行；只在下一条候选开始时结束，不从历史聊天中匹配相似文本。
+        for match in re.finditer(
+            r"^(\d+): 情景=(.*?) \| 风格=(.*?)(?=^\d+: 情景=|\Z)",
+            text, re.MULTILINE | re.DOTALL,
+        ):
+            candidates[int(match[1])] = SelectedExpressionPair(situation=match[2].strip(), style=match[3].strip())
+
+    pairs: List[SelectedExpressionPair] = []
+    seen_ids = set()
+    for selected_id in selected_ids:
+        if type(selected_id) is not int or selected_id not in candidates:
+            continue  # 与选择器一致，忽略模型返回的无效候选编号。
+        if selected_id not in seen_ids:
+            seen_ids.add(selected_id)
+            pairs.append(candidates[selected_id])
+        if len(pairs) >= 5:
+            break
+    if selected_ids and not candidates:
+        return None
+    return pairs
 
 
 def _extract_output_preview_from_json_payload(payload: dict[str, Any], max_chars: int = 160) -> str | None:
@@ -1833,7 +1892,7 @@ def _hydrate_prompt_file_record(
     hydrated_record = dict(record)
     stage_name = str(hydrated_record["stage"])
     should_extract_action_preview = include_action_preview and stage_name in {"jargon_learning_update", "planner"}
-    should_extract_output_preview = include_output_preview and stage_name == "replyer"
+    should_extract_output_preview = include_output_preview and stage_name in {"replyer", "expression_selector"}
     should_extract_llm_error_preview = stage_name == "llm_error"
     json_payload: dict[str, Any] | None = None
 
@@ -1849,6 +1908,13 @@ def _hydrate_prompt_file_record(
             _merge_prompt_metadata(hydrated_record, _extract_prompt_metadata_from_json_payload(json_payload))
             if should_extract_llm_error_preview:
                 hydrated_record["display_title"] = _extract_llm_error_display_title(json_payload)
+            elif stage_name == "expression_selector":
+                pairs = _extract_selected_expression_pairs(json_payload)
+                hydrated_record["selected_expressions"] = pairs
+                hydrated_record["output_preview"] = (
+                    "；".join(f"{pair.situation} → {pair.style}" for pair in pairs)
+                    if pairs else "未选择表达" if pairs == [] else "无法从记录还原已选表达"
+                )
             elif stage_name == "replyer" and (include_previews or should_extract_output_preview):
                 hydrated_record["output_preview"] = _extract_output_preview_from_json_payload(json_payload)
             elif stage_name == "planner" or _is_jargon_learning_update_preview_payload(json_payload):
@@ -2246,7 +2312,7 @@ def get_reasoning_prompt_image(path: str = Query(...)):
 
     try:
         image_path = _resolve_replay_image_path(path)
-    except ValueError as exc:
+    except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     media_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
     return FileResponse(image_path, media_type=media_type)

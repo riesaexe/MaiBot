@@ -54,6 +54,8 @@ export interface InstalledPlugin {
   enabled?: boolean | null
   disabled?: boolean
   loaded?: boolean
+  /** 后端累计的实际运行秒数，不含禁用或停机时间。 */
+  usage_seconds?: number
   load_status?: 'success' | 'failed' | 'inactive' | 'disabled' | 'offline' | 'unknown' | 'loading' | 'stopping' | 'not_loaded' | 'stopped'
   load_error?: string
   circuit_status?: {
@@ -191,7 +193,29 @@ export interface ConfigLayoutSchema {
 /**
  * 插件配置 Schema
  */
+export interface ConfigWidget {
+  id: string
+  kind: 'qrcode' | 'status' | 'action'
+  label: string
+  confirmation?: string | null
+}
+
+export interface ConfigWidgetState {
+  text: string
+  tone: 'neutral' | 'success' | 'warning' | 'error'
+  image?: string | null
+  expires_at?: number | null
+  visible: boolean
+  disabled: boolean
+}
+
+export interface ConfigWidgetSnapshot {
+  widgets: ConfigWidget[]
+  states: Record<string, ConfigWidgetState>
+}
+
 export interface PluginConfigSchema {
+  runtime_widgets?: ConfigWidget[]
   plugin_id: string
   plugin_info: {
     name: string

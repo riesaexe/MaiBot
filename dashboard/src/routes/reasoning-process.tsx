@@ -100,7 +100,7 @@ const AUTO_SESSION = 'auto'
 const ALL_GROUP_SESSIONS = '__all_group_chats__'
 const CORE_STAGE_NAMES = ['planner', 'replyer']
 const LLM_ERROR_STAGE_NAMES = ['llm_error']
-const REMOVED_STAGE_NAMES = ['timing_gate']
+const REMOVED_STAGE_NAMES = ['timing_gate', 'reply_effect_judge']
 
 type StageCategoryRow = {
   key: string
@@ -1417,8 +1417,8 @@ export function ReasoningProcessPage({
       ) : (
         <div
           className={cn(
-            // 移动端列表与详情纵向堆叠，整体可上下滚动；桌面端各栏各自滚动
-            'grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-x-hidden overflow-y-auto transition-[gap,grid-template-columns] duration-300 ease-out lg:overflow-visible',
+            // 移动端各面板按内容高度排列且不收缩，避免列表溢出后与详情重叠；桌面端各栏各自滚动
+            'flex min-h-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto transition-[gap,grid-template-columns] duration-300 ease-out max-lg:[&>div]:shrink-0 lg:grid lg:overflow-visible',
             replayPanelOpen
               ? 'lg:grid-cols-[320px_minmax(0,1fr)_420px] xl:grid-cols-[360px_minmax(0,1fr)_460px]'
               : 'lg:grid-cols-[340px_minmax(0,1fr)] xl:grid-cols-[380px_minmax(0,1fr)]'
@@ -1426,7 +1426,7 @@ export function ReasoningProcessPage({
         >
           <div
             data-reasoning-panel="true"
-            className="bg-background flex min-h-0 flex-col overflow-hidden rounded-md border transition-[opacity,transform,border-width] duration-300 ease-out max-lg:self-start"
+            className="bg-background flex min-h-0 flex-col overflow-hidden rounded-md border transition-[opacity,transform,border-width] duration-300 ease-out"
           >
             {embedded && browsingStage && (
               <div
@@ -1444,7 +1444,7 @@ export function ReasoningProcessPage({
             <ScrollArea
               data-reasoning-screen="true"
               data-reasoning-list="true"
-              className="min-h-0 flex-1 max-lg:flex-none max-lg:overflow-visible max-lg:[&>[data-dashboard-scrollbar]]:hidden"
+              className="min-h-0 flex-1 max-lg:h-auto max-lg:flex-none max-lg:overflow-visible max-lg:[&>[data-dashboard-scrollbar]]:hidden"
               viewportClassName="max-lg:h-auto max-lg:!overflow-visible max-lg:overscroll-auto"
               scrollbars="vertical"
             >
@@ -1458,7 +1458,8 @@ export function ReasoningProcessPage({
                   const metadataText = getReasoningMetadataText(item)
                   const rawPreviewText =
                     item.display_title ||
-                    (item.stage === 'replyer' ? item.output_preview : item.action_preview)
+                    (item.stage === 'replyer' || item.stage === 'expression_selector'
+                      ? item.output_preview : item.action_preview)
                   // 规划器没有调用任何工具时，这一轮就是不回复；用次要颜色标出，不和有动作的记录抢视线
                   const noReply = !rawPreviewText && item.stage === 'planner'
                   const previewText = rawPreviewText
@@ -1585,7 +1586,10 @@ export function ReasoningProcessPage({
 
           <div
             data-reasoning-panel="true"
-            className="bg-background flex min-h-0 flex-col overflow-hidden rounded-md border max-lg:self-start"
+            className={cn(
+              'bg-background flex min-h-0 flex-col overflow-hidden rounded-md border',
+              !selected && 'max-lg:hidden'
+            )}
           >
             {replayPanelOpen ? (
               <ReplayItemEditorColumn
@@ -1600,9 +1604,9 @@ export function ReasoningProcessPage({
               <Tabs
                 value={activePreview}
                 onValueChange={(value) => setActivePreview(value as 'structured' | 'text' | 'html')}
-                className="flex min-h-0 flex-1 flex-col"
+                className="flex min-h-0 flex-1 flex-col max-lg:flex-none"
               >
-                <div className="relative min-h-0 flex-1 overflow-hidden">
+                <div className="relative min-h-0 flex-1 overflow-hidden max-lg:flex-none">
                   <ScrollArea
                     data-reasoning-screen="true"
                     className="h-full transition-transform duration-300 ease-out max-lg:h-auto max-lg:flex-none max-lg:overflow-visible max-lg:[&>[data-dashboard-scrollbar]]:hidden"
@@ -1633,7 +1637,7 @@ export function ReasoningProcessPage({
                           )}
                           {!selected && (
                             <div className="text-muted-foreground truncate text-xs">
-                              从左侧列表选择一条记录
+                              从记录列表选择一条记录
                             </div>
                           )}
                         </div>
@@ -1804,6 +1808,23 @@ export function ReasoningProcessPage({
                                 avatarMap={messageAvatarMap}
                                 botSelfNames={botSelfNames}
                               />
+                              {selected?.stage === 'expression_selector' && (
+                                <div className="mt-3 space-y-1.5 text-sm">
+                                  <div className="font-medium">已选表达</div>
+                                  {selected.selected_expressions?.length ? (
+                                    selected.selected_expressions.map((expression, index) => (
+                                      <div key={index} className="break-words whitespace-pre-wrap">
+                                        {expression.situation} → {expression.style}
+                                      </div>
+                                    ))
+                                  ) : (
+                                    <div className="text-muted-foreground">
+                                      {selected.selected_expressions
+                                        ? '未选择表达' : '无法从记录还原已选表达'}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
 
                             {headerMeta.remainingText && (

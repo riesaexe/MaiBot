@@ -256,25 +256,6 @@ def _upgrade_expression_learning_defaults(data: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def _normalize_webui_host_to_list(data: dict[str, Any]) -> list[str]:
-    """
-    8.14.13: 将 WebUI host 从 str 转换为 list[str]。
-    旧配置中 host 为单地址字符串（如 "127.0.0.1"），新配置为列表。
-    """
-    webui = _as_dict(data.get("webui"))
-    if webui is None:
-        return []
-
-    host = webui.get("host")
-    if isinstance(host, list):
-        return []
-    if isinstance(host, str):
-        webui["host"] = [host]
-        return ["webui.host"]
-
-    return []
-
-
 def _move_chat_config_key(chat: dict[str, Any], section_name: str, key: str) -> bool:
     if key not in chat:
         return False
@@ -302,11 +283,8 @@ def _split_chat_config_sections(data: dict[str, Any]) -> list[str]:
     moved_paths: list[str] = []
     timing_keys = (
         "talk_value",
-        "private_talk_value",
         "mentioned_bot_reply",
         "inevitable_at_reply",
-        "reply_trigger_mode",
-        "planner_interrupt_max_consecutive_count",
         "max_consecutive_wait_count",
         "no_action_backoff_base_seconds",
         "no_action_backoff_cap_seconds",
@@ -428,12 +406,12 @@ def _migrate_removed_expression_selection_mode(data: dict[str, Any]) -> list[str
 
 
 def _reset_expression_defaults(data: Dict[str, Any]) -> List[str]:
-    """8.14.58: 重置精选限制，移除旧表达模式并默认启用向量表达。"""
+    """8.14.58: 重置精选限制并移除旧表达模式；缺少档位时沿用当前默认的快速档。"""
 
     reasons: List[str] = []
     if set_nested_config_value(data, ("expression", "expression_checked_only"), False):
         reasons.append("expression.expression_checked_only")
-    if set_nested_config_value(data, ("expression", "use_vector_expression"), True, force=False):
+    if set_nested_config_value(data, ("expression", "use_vector_expression"), False, force=False):
         reasons.append("expression.use_vector_expression")
     expression = data["expression"]
     if "expression_selection_mode" in expression:
@@ -442,16 +420,16 @@ def _reset_expression_defaults(data: Dict[str, Any]) -> List[str]:
     return reasons
 
 
-def _migrate_removed_reply_necessity_trigger_mode(data: dict[str, Any]) -> list[str]:
-    """8.14.54: 将已移除的 reply_necessity 回复触发模式迁移为 dynamic。"""
+def _move_planner_message_steering_to_reply_timing(data: dict[str, Any]) -> list[str]:
+    """8.15.37: 快速反应模式从实验性功能移到聊天回复时机，沿用原开关值。"""
 
-    chat = _as_dict(data.get("chat"))
-    reply_timing = _as_dict(chat.get("reply_timing")) if chat is not None else None
-    if reply_timing is None or reply_timing.get("reply_trigger_mode") != "reply_necessity":
+    experimental = _as_dict(data.get("experimental"))
+    if experimental is None or "planner_message_steering" not in experimental:
         return []
 
-    reply_timing["reply_trigger_mode"] = "dynamic"
-    return ["chat.reply_timing.reply_trigger_mode"]
+    enabled = experimental.pop("planner_message_steering")
+    set_nested_config_value(data, ("chat", "reply_timing", "planner_message_steering"), enabled)
+    return ["chat.reply_timing.planner_message_steering"]
 
 
 def _learning_default_item(source: Optional[Dict[str, Any]], rule_type: str) -> Dict[str, Any]:
@@ -557,6 +535,30 @@ def _merge_wildcard_learning_rules_into_defaults(data: Dict[str, Any]) -> List[s
     return reasons
 
 
+def _migrate_webui_http_bindings(data: Dict[str, Any]) -> List[str]:
+    """8.15.62: 一次性迁移旧 WebUI 监听配置，已存在的 HTTP 字段优先。"""
+    webui = data.get("webui")
+    if not isinstance(webui, dict) or not any(key in webui for key in ("host", "port")):
+        return []
+
+    http = data.setdefault("http", {})
+    if not isinstance(http, dict):
+        raise ValueError("http 配置必须为 TOML 配置节")
+
+    reasons: List[str] = []
+    for key in ("host", "port"):
+        if key not in webui:
+            continue
+        value = webui.pop(key)
+        # 按字段补齐，显式的新值（包括默认值或非法值）均保留，由配置校验处理。
+        if key not in http:
+            if key == "host" and isinstance(value, str):
+                value = [value]
+            http[key] = value
+        reasons.append(f"webui.{key}->http.{key}")
+    return reasons
+
+
 BOT_CONFIG_UPGRADE_HOOKS: tuple[ConfigUpgradeHook, ...] = (
     ConfigUpgradeHook(
         target_version="8.10.11",
@@ -584,11 +586,6 @@ BOT_CONFIG_UPGRADE_HOOKS: tuple[ConfigUpgradeHook, ...] = (
         migrate=_upgrade_expression_learning_defaults,
     ),
     ConfigUpgradeHook(
-        target_version="8.14.13",
-        config_names=("bot_config.toml",),
-        migrate=_normalize_webui_host_to_list,
-    ),
-    ConfigUpgradeHook(
         target_version="8.14.19",
         config_names=("bot_config.toml",),
         migrate=_split_chat_config_sections,
@@ -604,11 +601,6 @@ BOT_CONFIG_UPGRADE_HOOKS: tuple[ConfigUpgradeHook, ...] = (
         migrate=_migrate_removed_expression_selection_mode,
     ),
     ConfigUpgradeHook(
-        target_version="8.14.54",
-        config_names=("bot_config.toml",),
-        migrate=_migrate_removed_reply_necessity_trigger_mode,
-    ),
-    ConfigUpgradeHook(
         target_version="8.14.58",
         config_names=("bot_config.toml",),
         migrate=_reset_expression_defaults,
@@ -617,6 +609,16 @@ BOT_CONFIG_UPGRADE_HOOKS: tuple[ConfigUpgradeHook, ...] = (
         target_version="8.14.60",
         config_names=("bot_config.toml",),
         migrate=_merge_wildcard_learning_rules_into_defaults,
+    ),
+    ConfigUpgradeHook(
+        target_version="8.15.37",
+        config_names=("bot_config.toml",),
+        migrate=_move_planner_message_steering_to_reply_timing,
+    ),
+    ConfigUpgradeHook(
+        target_version="8.15.62",
+        config_names=("bot_config.toml",),
+        migrate=_migrate_webui_http_bindings,
     ),
 )
 

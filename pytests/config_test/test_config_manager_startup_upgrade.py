@@ -41,7 +41,7 @@ def test_load_repairs_removed_vector_mode_after_legacy_migration_completed(
     loaded_config, updated = load_config_from_file(Config, config_path, "8.14.58")
 
     assert updated is True
-    assert loaded_config.expression.use_vector_expression is True
+    assert loaded_config.expression.use_vector_expression is False
     assert loaded_config.expression.expression_checked_only is False
     assert loaded_config.a_memorix.web.import_config.max_files_per_task == 321
     assert reported_changes == [([], [])]
@@ -49,7 +49,7 @@ def test_load_repairs_removed_vector_mode_after_legacy_migration_completed(
         repaired_document = tomlkit.load(config_file)
     assert repaired_document["inner"]["version"] == "8.14.58"
     assert "expression_selection_mode" not in repaired_document["expression"]
-    assert repaired_document["expression"]["use_vector_expression"] is True
+    assert repaired_document["expression"]["use_vector_expression"] is False
     assert repaired_document["expression"]["expression_checked_only"] is False
     assert repaired_document["a_memorix"]["web"]["import"]["max_files_per_task"] == 321
     assert "import_config" not in repaired_document["a_memorix"]["web"]
@@ -70,6 +70,7 @@ def test_initialize_upgrades_bot_and_model_config_without_exit(monkeypatch):
         return object(), True
 
     monkeypatch.setattr(config_module, "load_config_from_file", fake_load_config_from_file)
+    monkeypatch.setattr(manager, "_sync_retro_reply_prompt", lambda config, models: None)
     monkeypatch.setattr(ConfigManager, "_warn_if_vlm_not_configured", lambda self, model_config: warnings.append(model_config))
 
     manager.initialize()

@@ -4,7 +4,6 @@ from rich.traceback import install
 from typing import TypeVar
 
 import asyncio
-import hashlib
 import os
 import platform
 
@@ -92,7 +91,7 @@ if __name__ == "__main__" and os.environ.get("MAIBOT_WORKER_PROCESS") == "1":
     _install_early_worker_signal_handlers()
 
 
-from src.common.paths import PACKAGED_INSTALL, SOURCE_ROOT, get_instance_root, resource_path  # noqa: E402
+from src.common.paths import PACKAGED_INSTALL, SOURCE_ROOT, get_instance_root  # noqa: E402
 from src.common.i18n import set_locale, t, tn  # noqa: E402
 from src.common.logger import get_logger, initialize_logging, shutdown_logging  # noqa: E402
 from src.common.runtime_loop import set_main_loop  # noqa: E402
@@ -179,7 +178,6 @@ from src.manager.async_task_manager import async_task_manager  # noqa
 # 设置工作目录为实例目录
 # script_dir = str(get_instance_root())
 # os.chdir(script_dir)
-confirm_logger = get_logger("confirm")
 # 获取没有加载env时的环境变量
 env_mask = {key: os.getenv(key) for key in os.environ}
 
@@ -238,10 +236,42 @@ async def graceful_shutdown(main_system: MainSystem | None = None) -> bool:
         logger.info(t("startup.shutdown_started"))
         success = True
 
-        # 关闭 WebUI 服务器
-        if main_system is not None and main_system.webui_server is not None:
+        from src.common.logger import stop_ws_broadcasts
+        from src.chat.heart_flow.heartflow_manager import heartflow_manager
+
+        # 先关闭广播入口，后续关停日志只写文件/终端，不再派生 WebSocket 任务。
+        success = (
+            await _await_shutdown_step(stop_ws_broadcasts(), timeout=2.0, step_name="停止日志广播") and success
+        )
+
+        if main_system is not None and main_system.app is not None:
             success = (
-                await _await_shutdown_step(main_system.webui_server.shutdown(), timeout=5.0, step_name="关闭 WebUI")
+                await _await_shutdown_step(main_system.app.stop(), timeout=5.0, step_name="停止消息入口") and success
+            )
+        # 消息生产者先于插件、电脑及存储关闭，避免在依赖销毁后继续调用工具。
+        success = (
+            await _await_shutdown_step(heartflow_manager.shutdown(), timeout=5.0, step_name="停止聊天循环")
+            and success
+        )
+
+        from src.agent.service import agent_service
+        from src.computer.service import computer_service
+
+        # 实际 CLI 入口不经过 src.main.main 的 finally；保存电脑状态，保留沙盒供下次恢复。
+        success = (
+            await _await_shutdown_step(agent_service.stop(), timeout=8.0, step_name="停止外接 Agent")
+            and success
+        )
+
+        success = (
+            await _await_shutdown_step(computer_service.stop(), timeout=8.0, step_name="保存并断开电脑")
+            and success
+        )
+
+        # 关闭公共 HTTP 服务器（包含文件传输和可选 WebUI）
+        if main_system is not None and main_system.http_server is not None:
+            success = (
+                await _await_shutdown_step(main_system.http_server.shutdown(), timeout=5.0, step_name="关闭 HTTP 服务")
                 and success
             )
 
@@ -251,11 +281,6 @@ async def graceful_shutdown(main_system: MainSystem | None = None) -> bool:
             await _await_shutdown_step(config_manager.stop_file_watcher(), timeout=5.0, step_name="停止配置监听")
             and success
         )
-        if main_system is not None and main_system.app is not None:
-            success = (
-                await _await_shutdown_step(main_system.app.stop(), timeout=5.0, step_name="停止消息入口") and success
-            )
-
         from src.core.event_bus import event_bus
         from src.core.types import EventType
 
@@ -315,7 +340,10 @@ async def graceful_shutdown(main_system: MainSystem | None = None) -> bool:
         )
         _shutdown_deadline = shutdown_deadline
         try:
-            emoji_manager.shutdown()
+            from src.common.shutdown_diagnostics import shutdown_step
+
+            with shutdown_step("关闭 Emoji"):
+                emoji_manager.shutdown()
         except Exception:
             logger.exception("Emoji 清理失败，继续后续关闭步骤")
             success = False
@@ -344,9 +372,12 @@ async def graceful_shutdown(main_system: MainSystem | None = None) -> bool:
 
             # 等待所有任务完成，设置超时
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(*remaining_tasks, return_exceptions=True), timeout=_shutdown_time_left(5.0)
-                )
+                from src.common.shutdown_diagnostics import shutdown_step
+
+                with shutdown_step("取消剩余任务"):
+                    await asyncio.wait_for(
+                        asyncio.gather(*remaining_tasks, return_exceptions=True), timeout=_shutdown_time_left(5.0)
+                    )
                 logger.info(t("startup.remaining_tasks_cancelled"))
             except asyncio.TimeoutError:
                 logger.warning(t("startup.remaining_tasks_cancel_timeout"))
@@ -376,7 +407,10 @@ async def _await_shutdown_step(awaitable, *, timeout: float, step_name: str) -> 
     """步骤共享当前阶段预算；不响应取消/阻塞事件循环的代码最终由 Runner 有界终止。"""
 
     try:
-        await asyncio.wait_for(awaitable, timeout=_shutdown_time_left(timeout))
+        from src.common.shutdown_diagnostics import shutdown_step
+
+        with shutdown_step(step_name):
+            await asyncio.wait_for(awaitable, timeout=_shutdown_time_left(timeout))
         return True
     except asyncio.TimeoutError:
         logger.warning(f"{step_name} 超时，继续执行后续关停步骤")
@@ -453,118 +487,6 @@ def _run_graceful_shutdown(
     return False
 
 
-def _calculate_file_hash(file_path: Path, file_type: str) -> str:
-    """计算文件的MD5哈希值"""
-    if not file_path.exists():
-        logger.error(t("startup.file_not_found", file_type=file_type))
-        raise FileNotFoundError(t("startup.file_not_found", file_type=file_type))
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
-
-
-def _check_agreement_status(file_hash: str, confirm_file: Path, env_var: str) -> tuple[bool, bool]:
-    """检查协议确认状态
-
-    Returns:
-        tuple[bool, bool]: (已确认, 未更新)
-    """
-    # 检查环境变量确认
-    if file_hash == os.getenv(env_var):
-        return True, False
-
-    # 检查确认文件
-    if confirm_file.exists():
-        with open(confirm_file, "r", encoding="utf-8") as f:
-            confirmed_content = f.read()
-        if file_hash == confirmed_content:
-            return True, False
-
-    return False, True
-
-
-def _interrupt_agreement_confirmation(_signum: int, _frame: object) -> None:
-    """同步协议确认尚无事件循环，停止信号直接中断阻塞输入。"""
-    raise KeyboardInterrupt
-
-
-def _prompt_user_confirmation(eula_hash: str, privacy_hash: str) -> None:
-    """提示用户确认协议，并在离开交互阶段时恢复原信号处理。"""
-    handlers = {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: _interrupt_agreement_confirmation}
-    if hasattr(signal, "SIGBREAK"):
-        handlers[signal.SIGBREAK] = _interrupt_agreement_confirmation
-    previous = {}
-    try:
-        for sig, handler in handlers.items():
-            previous[sig] = signal.signal(sig, handler)
-        # 导入期间已收到停止请求时，不能再进入 input 等待下一次信号。
-        if _shutdown_signal_count:
-            raise KeyboardInterrupt
-        confirm_logger.critical(t("startup.agreement_reconfirm"))
-        confirm_logger.critical(
-            t(
-                "startup.agreement_confirm_prompt",
-                eula_hash=eula_hash,
-                privacy_hash=privacy_hash,
-            )
-        )
-
-        while True:
-            user_input = input().strip().lower()
-            if user_input in ["同意", "confirmed"]:
-                return
-            confirm_logger.critical(t("startup.agreement_confirm_retry"))
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
-
-
-def _save_confirmations(eula_updated: bool, privacy_updated: bool, eula_hash: str, privacy_hash: str) -> None:
-    """保存用户确认结果"""
-    if eula_updated:
-        logger.info(
-            t(
-                "startup.agreement_updated",
-                agreement_name=t("startup.eula_name"),
-                file_hash=eula_hash,
-            )
-        )
-        Path("eula.confirmed").write_text(eula_hash, encoding="utf-8")
-
-    if privacy_updated:
-        logger.info(
-            t(
-                "startup.agreement_updated",
-                agreement_name=t("startup.privacy_name"),
-                file_hash=privacy_hash,
-            )
-        )
-        Path("privacy.confirmed").write_text(privacy_hash, encoding="utf-8")
-
-
-def check_eula():
-    """检查EULA和隐私条款确认状态"""
-    # 计算文件哈希值
-    eula_hash = _calculate_file_hash(resource_path("EULA.md"), "EULA.md")
-    privacy_hash = _calculate_file_hash(resource_path("PRIVACY.md"), "PRIVACY.md")
-
-    # 检查确认状态
-    eula_confirmed, eula_updated = _check_agreement_status(eula_hash, Path("eula.confirmed"), "EULA_AGREE")
-    privacy_confirmed, privacy_updated = _check_agreement_status(
-        privacy_hash, Path("privacy.confirmed"), "PRIVACY_AGREE"
-    )
-
-    # 早期返回：如果都已确认且未更新
-    if eula_confirmed and privacy_confirmed:
-        return
-
-    # 如果有更新，需要重新确认
-    if eula_updated or privacy_updated:
-        _prompt_user_confirmation(eula_hash, privacy_hash)
-        _save_confirmations(eula_updated, privacy_updated, eula_hash, privacy_hash)
-
-
 def raw_main():
     # 利用 TZ 环境变量设定程序工作的时区
     if platform.system().lower() != "windows":
@@ -573,8 +495,7 @@ def raw_main():
     # 打印开源提示（防止倒卖）
     print_opensource_notice()
 
-    check_eula()
-    logger.info(t("startup.eula_privacy_checked"))
+    logger.info(t("startup.usage_notice"))
 
     easter_egg()
 
@@ -675,6 +596,9 @@ if __name__ == "__main__":
 
             # 关闭日志系统，释放文件句柄
             try:
+                from src.common.memory_diagnostics import stop_memory_diagnostics
+
+                stop_memory_diagnostics()
                 shutdown_logging()
             except Exception as e:
                 print(t("startup.logging_shutdown_error", error=e))

@@ -14,16 +14,6 @@ OVERSIZED_IMAGE_HANDLE_METHOD_DESCRIPTIONS = {
     "discard": "丢弃超过最大大小的图片组件",
 }
 
-REPLY_TRIGGER_MODE_OPTION_DESCRIPTIONS = {
-    "frequency": "按照新消息数量决定思考",
-    "dynamic": "估计每批消息的回复可能性并动态调整门槛，让回复次数贴近回复频率",
-}
-
-REPLY_TRIGGER_MODE_OPTION_LABELS = {
-    "frequency": "频率触发",
-    "dynamic": "动态触发",
-}
-
 ATTENTION_DRIFT_LEVEL_OPTION_LABELS = {
     "subtle": "轻微漂移",
     "active": "活跃联想",
@@ -155,14 +145,48 @@ class BotConfig(ConfigBase):
     """别人可能用来称呼麦麦的名字，用于辅助识别提及。"""
 
 
+class PersonalityProfile(ConfigBase):
+    """可手动切换的人设快照。"""
+
+    name: str = Field(min_length=1, pattern=r"\S")
+    """人设名称。"""
+    personality: str
+    """人格和身份设定。"""
+    behavior_style: str
+    """行为风格。"""
+    reply_style: str
+    """表达风格。"""
+    group_chat_prompt: str
+    """群聊提示词。"""
+    private_chat_prompts: str
+    """私聊提示词。"""
+    multiple_reply_style: List[str] = Field(default_factory=list)
+    """备用表达风格。"""
+    multiple_probability: float = Field(default=0, ge=0, le=1)
+    """备用表达风格触发概率。"""
+
+
 class PersonalityConfig(ConfigBase):
     """人格配置类"""
 
     __ui_parent__ = "bot"
     __ui_label__ = "人格"
 
+    profiles: List[PersonalityProfile] = Field(default_factory=list, json_schema_extra={"x-widget": "custom"})
+    """备选人设库，由 WebUI 保存与切换；运行时使用下方当前人设字段。"""
+
+    selected_profile: str = Field(default="", json_schema_extra={"x-widget": "custom"})
+    """当前编辑的人设名称，空字符串表示尚未存入人设库。"""
+
+    def model_post_init(self, context: Optional[object] = None) -> None:
+        """名称作为切换标识，不能重复。"""
+        super().model_post_init(context)
+        names = [profile.name for profile in self.profiles]
+        if len(names) != len(set(names)):
+            raise ValueError("备选人设名称不能重复")
+
     personality: str = Field(
-        default="是一个大二女大学生，现在正在上网和群友聊天。善于用人类的角度思考问题，聊天偏日常。",
+        default="是女大学生，现在正在上网聊天。一般不包容且善良，但有时候有点一反常态，表现出锐利攻击性。善于用人类的角度思考问题，聊天比较日常。",
         json_schema_extra={
             "label": {
                 "zh_CN": "人格设定",
@@ -179,7 +203,7 @@ class PersonalityConfig(ConfigBase):
 
     behavior_style: str = Field(
         default=(
-            "是大二女大学生，现在正在上网和群友聊天。善于用人类的角度思考问题，聊天偏日常。不会没话题硬找话题，"
+            "是女大学生，现在正在上网聊天。一般不包容且善良，但有时候有点一反常态，表现出锐利攻击性。善于用人类的角度思考问题，聊天比较日常。不会没话题硬找话题，具有足够的自主性，会自行搜集信息理解内容。"
         ),
         json_schema_extra={
             "label": {
@@ -313,6 +337,24 @@ class VisualConfig(ConfigBase):
 
     __ui_label__ = "视觉"
     __ui_order__ = 60
+
+    image_quality: Literal["normal", "high"] = Field(
+        default="normal",
+        json_schema_extra={
+            "x-widget": "discrete-slider",
+            "label": {
+                "zh_CN": "图片画质",
+                "en_US": "Image quality",
+                "ja_JP": "画像品質",
+            },
+            "x-option-labels": {"normal": "普通", "high": "超清"},
+            "x-option-descriptions": {
+                "normal": "最长边 512 像素，默认档位。",
+                "high": "最长边 1024 像素，保留更多图片细节。",
+            },
+        },
+    )
+    """聊天普通图片发送给规划和回复模型时的画质：普通（normal）512、超清（high）1024 像素最长边。等比例缩小，小图不放大，不修改原图和表情包。"""
 
     max_image_num: int = Field(
         default=64,
@@ -463,11 +505,98 @@ class TalkRulesItem(ConfigBase):
     """该规则下的发言频率；0 更安静，1 按正常频率。"""
 
 
+class PrivateReplyPauseRule(ConfigBase):
+    platform: str = Field(
+        default="",
+        min_length=1,
+        json_schema_extra={"label": {"zh_CN": "平台", "en_US": "Platform", "ja_JP": "プラットフォーム"}},
+    )
+    """私聊所在的平台，需填写具体平台。"""
+
+    item_id: str = Field(
+        default="",
+        min_length=1,
+        json_schema_extra={"label": {"zh_CN": "用户 ID", "en_US": "User ID", "ja_JP": "ユーザー ID"}},
+    )
+    """私聊对象的用户 ID，需填写具体用户。"""
+
+    paused: bool = Field(
+        default=True,
+        json_schema_extra={
+            "label": {"zh_CN": "暂停回复", "en_US": "Pause replies", "ja_JP": "返信を一時停止"},
+            "x-widget": "switch",
+        },
+    )
+    """开启后暂停这个私聊的回复；关闭则允许回复，覆盖全局私聊暂停设置。"""
+
+
 class ChatReplyTimingConfig(ConfigBase):
     """聊天回复时机与频率配置类"""
 
     __ui_label__ = "回复频率"
     __ui_icon__ = "activity"
+
+    message_debounce_mode: Literal["off", "fast", "natural", "steady"] = Field(
+        default="natural",
+        json_schema_extra={
+            "label": {
+                "zh_CN": "群聊消息防抖",
+                "en_US": "Group message debouncing",
+                "ja_JP": "グループメッセージのデバウンス",
+            },
+            "x-widget": "discrete-slider",
+            "x-option-labels": {"off": "关闭", "fast": "快速", "natural": "自然", "steady": "沉稳"},
+            "x-option-descriptions": {
+                "off": "关闭防抖，新消息不等待，直接进入判断。",
+                "fast": "安静 1 秒、活跃 3 秒，同人续发 1 秒、换人 0.5 秒。等待更少，但更容易漏接分段补充。",
+                "natural": "默认：安静 2 秒、活跃 5 秒，同人续发 2 秒、换人 0.5 秒。兼顾等待时间和补充消息。",
+                "steady": "安静 4 秒、活跃 7 秒，同人续发 4 秒、换人 2 秒。合并更多判断、多留补充时间，但没有补充时也更慢，并非每个群都能等得更齐。",
+            },
+        },
+    )
+    """仅作用于群聊，默认自然，只需选择关闭、快速、自然或沉稳，无需另开开关。
+    一批指合并后一起送入判断的消息；新批次按上一条有效消息的间隔选择初始等待：超过 30 秒或没有历史为安静，否则为活跃。同人/换人均与紧邻的上一条消息比较，重新从新消息起计算等待，可提前或延后结束。
+    快速为安静 1 秒、活跃 3 秒、同人 1 秒、换人 0.5 秒：更快，但更容易漏接分段补充。自然为 2/5/2/0.5 秒：默认折中。沉稳为 4/7/4/2 秒：减少更多判断、多留补充机会，也会让没有补充的消息多等，不能保证每个群、每次都更完整。
+    三档共用：裸图开启新批次时至少等 4 秒，后续消息仍按续发规则重算；批次内纯表情包不能延长等待，但可以提前结束；整批从第一条实际收到起最多 8 秒，@或提及后最多 1 秒，连续提及取最早上限。上限优先于其他等待规则。
+    更换等待档位从下一条有效消息起生效，不重置批次或提及上限，不延长已到期批次；选择关闭会结束正在进行的等待，之后新消息不再等待。这里的时间仅指防抖排队，不包含模型生成和发送耗时。
+    """
+
+    private_message_debounce_mode: Literal["off", "fast", "natural", "steady"] = Field(
+        default="natural",
+        json_schema_extra={
+            "label": {
+                "zh_CN": "私聊消息防抖",
+                "en_US": "Private message debouncing",
+                "ja_JP": "プライベートメッセージのデバウンス",
+            },
+            "x-widget": "discrete-slider",
+            "x-option-labels": {"off": "关闭", "fast": "快速", "natural": "自然", "steady": "沉稳"},
+            "x-option-descriptions": {
+                "off": "关闭私聊防抖，新消息不等待，直接进入判断。",
+                "fast": "安静 1 秒、活跃 3 秒，连续补充 1 秒。等待更少，但更容易漏接分段补充。",
+                "natural": "默认：安静 2 秒、活跃 5 秒，连续补充 2 秒。兼顾等待时间和补充消息。",
+                "steady": "安静 4 秒、活跃 7 秒，连续补充 4 秒。多留补充时间，但没有补充时也更慢。",
+            },
+        },
+    )
+    """仅作用于私聊，与群聊档位独立，默认自然。
+    超过 30 秒没有有效消息时按安静开批，否则按活跃开批；连续补充从新消息起重算等待。
+    裸图开批至少等 4 秒，批次内纯表情包不延长等待，整批最多 8 秒，@或提及后最多 1 秒，上限优先。
+    更换档位从下一条有效消息起生效，不重置批次或提及上限，不延长已到期批次；选择关闭会结束正在进行的等待。时间不包含模型生成和发送耗时。
+    """
+
+    planner_message_steering: bool = Field(
+        default=False,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "快速反应模式",
+                "en_US": "Quick reaction mode",
+                "ja_JP": "即応モード",
+            },
+            "x-widget": "switch",
+        },
+    )
+    """强制 Planner 使用流式请求；思考或输出期间收到新消息立即打断并带上新消息重新请求，wait 等待也可被新消息提前结束。"""
 
     talk_value: float = Field(
         default=1,
@@ -486,25 +615,35 @@ class ChatReplyTimingConfig(ConfigBase):
     )
     """群聊里麦麦主动说话的频率；越小越安静。"""
 
-    private_talk_value: float = Field(
-        default=1,
-        ge=0,
-        le=1,
+    private_reply_paused: bool = Field(
+        default=False,
         json_schema_extra={
             "label": {
-                "zh_CN": "私聊频率",
-                "en_US": "Private talk frequency",
-                "ja_JP": "個別チャット発言頻度",
+                "zh_CN": "暂停私聊回复",
+                "en_US": "Pause private replies",
+                "ja_JP": "個別チャットの返信を一時停止",
             },
-            "x-widget": "slider",
+            "x-widget": "switch",
             "x-row": "talk-values",
-            "step": 0.001,
         },
     )
-    """私聊里麦麦主动说话的频率；越小越安静。"""
+    """开启后私聊只接收消息并维护历史，不进入思考；单个私聊可通过暂停规则覆盖此设置。"""
+
+    private_reply_pause_rules: List[PrivateReplyPauseRule] = Field(
+        default_factory=list,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "单个私聊暂停规则",
+                "en_US": "Private reply pause overrides",
+                "ja_JP": "個別チャットの返信一時停止ルール",
+            },
+            "x-widget": "custom",
+        },
+    )
+    """按具体平台和用户 ID 覆盖全局暂停设置，可在聊天流设置中切换或恢复跟随全局。"""
 
     mentioned_bot_reply: bool = Field(
-        default=False,
+        default=True,
         json_schema_extra={
             "label": {
                 "zh_CN": "提及必回复",
@@ -530,52 +669,6 @@ class ChatReplyTimingConfig(ConfigBase):
         },
     )
     """开启后，被 @ 时会尽量回复。"""
-
-    reply_trigger_mode: Literal["frequency", "dynamic"] = Field(
-        default="frequency",
-        json_schema_extra={
-            "label": {
-                "zh_CN": "回复触发模式",
-                "en_US": "Reply trigger mode",
-                "ja_JP": "返信トリガーモード",
-            },
-            "x-widget": "select",
-            "x-layout": "inline-right",
-            "x-input-width": "12rem",
-            "x-option-labels": REPLY_TRIGGER_MODE_OPTION_LABELS,
-            "x-option-descriptions": REPLY_TRIGGER_MODE_OPTION_DESCRIPTIONS,
-        },
-    )
-    """控制新消息何时进入 Planner。"""
-
-    planner_interrupt_max_consecutive_count: int = Field(
-        default=0,
-        ge=0,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "规划器连续打断上限",
-                "en_US": "Planner consecutive interrupt limit",
-                "ja_JP": "プランナー連続中断上限",
-            },
-            "x-widget": "input",
-            "advanced": True,
-        },
-    )
-    """思考时来了新消息，最多重新思考多少次。"""
-
-    max_consecutive_wait_count: int = Field(
-        default=3,
-        ge=1,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "连续 wait 上限",
-                "en_US": "Max consecutive wait",
-                "ja_JP": "連続 wait 上限",
-            },
-            "x-widget": "input",
-        },
-    )
-    """Planner 最多连续调用 wait 多少次；达到上限后 wait 工具会拒绝继续进入等待。"""
 
     no_action_backoff_base_seconds: float = Field(
         default=15,
@@ -654,7 +747,7 @@ class ChatReplyTimingConfig(ConfigBase):
             "x-widget": "switch",
         },
     )
-    """开启后，可以按聊天或时间段单独调整发言频率。"""
+    """开启后，可以按群聊或时间段单独调整发言频率；私聊不使用频率规则。"""
 
     talk_value_rules: list[TalkRulesItem] = Field(
         default_factory=lambda: [
@@ -671,7 +764,7 @@ class ChatReplyTimingConfig(ConfigBase):
         },
     )
     """
-    _wrap_动态发言频率规则；可让麦麦在某些群、私聊或时段更活跃或更安静。
+    _wrap_动态发言频率规则；可让麦麦在某些群或时段更活跃或更安静。旧的私聊频率规则不再生效。
     """
 
 
@@ -711,10 +804,10 @@ class ChatReplyStyleConfig(ConfigBase):
 
     group_chat_prompt: str = Field(
         default=(
-            "你正在qq群里聊天，下面是群里正在聊的内容，聊天中包含文字，图片和表情包等消息。\n"
-            "回复尽量简短一些。最好一次对一个话题进行回复，但必须考虑不同群友发言之间的交互，免得啰嗦或者回复内容太乱。请注意把握聊天内容。\n"
-            "不要总是提及自己的身份背景，根据聊天内容自由发挥，但是要日常不浮夸，不要刻意找话题。\n"
-            "不用刻意回复其他人发送的表情包，只要关注表情包表达的含义。你可以适当发送表情包表达情绪。控制回复的频率，不要每个人的消息都回复，优先回复你感兴趣的或者主动提及你的，适当回复其他话题。\n"
+            "下面是聊天中的的内容，聊天中包含文字，图片和表情包等消息。\n"
+            "回复尽量简短一些。最好一次对一个话题进行回复，但必须考虑不同群友发言之间的交互，免得啰嗦或者回复内容太乱。\n"
+            "根据聊天内容自由发挥，但是要日常不浮夸，不要刻意找话题。\n"
+            "不用刻意回复其他人发送的表情包。你可以适当发送表情包表达情绪。如果有人不喜欢你或者不理你，就不要强行回复，回复前读空气。不要每个人的消息都回复，适当回复其他话题。可以适当回过头回复之前用户的消息。\n"
         ),
         json_schema_extra={
             "label": {
@@ -780,7 +873,7 @@ class ChatConfig(ConfigBase):
     """允许麦麦在回复开头 @ 一个或多个用户，由模型根据聊天内容决定是否使用。"""
 
     max_context_size: int = Field(
-        default=40,
+        default=50,
         json_schema_extra={
             "label": {
                 "zh_CN": "群聊上下文",
@@ -796,7 +889,7 @@ class ChatConfig(ConfigBase):
     """群聊回复时参考的最近消息数量；越大越懂上下文，也更耗模型。"""
 
     max_private_context_size: int = Field(
-        default=60,
+        default=75,
         json_schema_extra={
             "label": {
                 "zh_CN": "私聊上下文",
@@ -811,36 +904,21 @@ class ChatConfig(ConfigBase):
     )
     """私聊回复时参考的最近消息数量。"""
 
-    mid_term_memory: bool = Field(
-        default=True,
+    context_compaction_summary_max_chars: int = Field(
+        default=6000,
+        ge=1000,
+        le=8000,
         json_schema_extra={
             "label": {
-                "zh_CN": "聊天回想",
-                "en_US": "Chat recall",
-                "ja_JP": "チャット回想",
-            },
-            "x-widget": "switch",
-            "x-row": "chat-recall-controls",
-        },
-    )
-    """打开后会主动召回最近聊天发生的事情。"""
-
-    mid_term_memory_lenth: int = Field(
-        default=10,
-        ge=0,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "聊天回想保留数",
-                "en_US": "Chat recall limit",
-                "ja_JP": "チャット回想保持数",
+                "zh_CN": "状态摘要字符上限",
+                "en_US": "State summary character limit",
+                "ja_JP": "状態要約の文字数上限",
             },
             "x-widget": "input",
-            "x-layout": "inline-right",
-            "x-input-width": "6.5rem",
-            "x-row": "chat-recall-controls",
+            "advanced": True,
         },
     )
-    """最多保留多少条聊天回想；设为 0 表示不保留。"""
+    """滚动状态摘要的最大字符数；使用 utils 模型生成，摘要始终随 Planner 上下文发送。"""
 
     reply_timing: ChatReplyTimingConfig = Field(default_factory=ChatReplyTimingConfig)
     """什么时候回复、回复频率与等待退避配置。"""
@@ -917,64 +995,36 @@ class AttentionDriftConfig(ConfigBase):
     """控制短句、吐槽、语气词等短反应在漂移风格中的使用方式。"""
 
 
-class ExperimentalConfig(ConfigBase):
-    """实验性功能配置类"""
+class GroupAttentionDriftConfig(AttentionDriftConfig):
+    """群聊注意力漂移配置。"""
 
-    __ui_label__ = "实验性功能"
-    __ui_advanced__ = True
-    __ui_order__ = 140
+    __ui_label__ = "群聊注意力漂移"
 
-    planner_message_steering: bool = Field(
+
+class PrivateAttentionDriftConfig(AttentionDriftConfig):
+    """私聊注意力漂移配置。"""
+
+    __ui_label__ = "私聊注意力漂移"
+
+
+class CapabilitiesConfig(ConfigBase):
+    """能力配置类"""
+
+    __ui_label__ = "能力"
+    __ui_order__ = 30
+
+    files: bool = Field(
         default=False,
         json_schema_extra={
             "label": {
-                "zh_CN": "快速反应模式",
-                "en_US": "Quick reaction mode",
-                "ja_JP": "即応モード",
+                "zh_CN": "文件功能",
+                "en_US": "File capabilities",
+                "ja_JP": "ファイル機能",
             },
             "x-widget": "switch",
         },
     )
-    """强制 Planner 使用流式请求；思考或输出期间收到新消息立即中断并重新请求，wait 等待也可被新消息提前结束。不等待静默窗口，也不限制连续打断次数。"""
-
-    replyer_retro_prompt: bool = Field(
-        default=False,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "复古回复提示词",
-                "en_US": "Retro reply prompt",
-                "ja_JP": "レトロ返信プロンプト",
-            },
-            "x-widget": "switch",
-        },
-    )
-    """按旧版（0.12.x）的方式组织 replyer 提示词：全部回复指令集中在一份完整模板里，用块占位符填充，群聊/私聊/简短回复各用一套模板，并整段作为一条 user 消息发送。"""
-
-    planner_optimized_prompt: bool = Field(
-        default=False,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "优化 Planner 提示词",
-                "en_US": "Optimized planner prompt",
-                "ja_JP": "Planner プロンプトの最適化",
-            },
-            "x-widget": "switch",
-        },
-    )
-    """Planner 改用优化版提示词：以“你的名字是……”的第二人称描述麦麦自己，去掉“替麦麦做决策”的旁观者设定并精简任务说明。Focus 模式仍使用原提示词。"""
-
-    planner_stop_tool: bool = Field(
-        default=False,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "优化工具使用",
-                "en_US": "Optimize tool usage",
-                "ja_JP": "ツール使用の最適化",
-            },
-            "x-widget": "switch",
-        },
-    )
-    """给 Planner 提供无参数的 stop() 工具，调用后结束本轮思考并等待新消息，与不输出任何工具时一致。"""
+    """启用聊天附件登记、文件工具、插件 SDK 和 WebUI 文件入口；默认关闭，不依赖 WebUI 或沙盒开关。关闭后拒绝新的文件操作，不删除已有原件。"""
 
     tool_result_condense: bool = Field(
         default=False,
@@ -1030,8 +1080,50 @@ class ExperimentalConfig(ConfigBase):
     )
     """子代理改为在后台运行：派发后立刻返回任务 id，麦麦可以继续聊天，子代理结束时结论作为一条新消息送回并唤醒 Planner；同时提供查看和终止后台任务的工具。需要先开启“子代理任务派发”。"""
 
-    attention_drift: AttentionDriftConfig = Field(default_factory=AttentionDriftConfig)
-    """注意力漂移实验模式；让麦麦在群聊/私聊中表现出更活跃的联想和轻微话题漂移。"""
+
+class ExperimentalConfig(ConfigBase):
+    """实验性功能配置类"""
+
+    __ui_label__ = "实验性功能"
+    __ui_advanced__ = True
+    __ui_order__ = 140
+
+    passive_replyer: bool = Field(
+        default=False,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "被动式 replyer",
+                "en_US": "Passive replyer",
+                "ja_JP": "受動型 replyer",
+            },
+            "x-widget": "switch",
+        },
+    )
+    """仅作用于普通聊天模式：Planner 不调用工具而输出正文时，将正文作为自然语言指导启动一次回复；篇幅、表达偏好和插件相关需求直接写入指导，引用与附件由并行回复补充器编排。关闭时使用原有 reply 工具。切换从下一轮思考生效，Focus 不受影响。"""
+
+    group_attention_drift: GroupAttentionDriftConfig = Field(
+        default_factory=GroupAttentionDriftConfig,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "群聊注意力漂移",
+                "en_US": "Group chat attention drift",
+                "ja_JP": "グループチャットの注意ドリフト",
+            },
+        },
+    )
+    """群聊注意力漂移实验模式；让麦麦在群聊中表现出更活跃的联想和轻微话题漂移。"""
+
+    private_attention_drift: PrivateAttentionDriftConfig = Field(
+        default_factory=PrivateAttentionDriftConfig,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "私聊注意力漂移",
+                "en_US": "Private chat attention drift",
+                "ja_JP": "個人チャットの注意ドリフト",
+            },
+        },
+    )
+    """私聊注意力漂移实验模式；让麦麦在私聊中表现出更活跃的联想和轻微话题漂移。"""
 
     focus_mode: bool = Field(
         default=False,
@@ -1044,7 +1136,7 @@ class ExperimentalConfig(ConfigBase):
             "x-widget": "switch",
         },
     )
-    """让麦麦同一时间只专注一个聊天流，适合直播或高强度聊天场景。"""
+    """让同组聊天共享一个持续思考的 Planner；全部消息共同进入上下文，工具通过 session_id 指定处理目标。"""
 
     focus_on_private: bool = Field(
         default=False,
@@ -1083,24 +1175,7 @@ class ExperimentalConfig(ConfigBase):
             "x-widget": "custom",
         },
     )
-    """_wrap_把聊天流分组后，同组共享 Focus，不同组互不抢占。"""
-
-    focus_cool_time: int = Field(
-        default=120,
-        ge=1,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "Focus 冷却时间",
-                "en_US": "Focus cool time",
-                "ja_JP": "Focus クールタイム",
-            },
-            "x-widget": "input",
-            "x-layout": "inline-right",
-            "x-input-width": "12rem",
-            "x-row": "focus-cool-time",
-        },
-    )
-    """当前关注的聊天多久没继续处理后，允许被其他聊天唤醒。"""
+    """_wrap_同组聊天共享 Planner 与完整上下文，不同组独立运行；未匹配的聊天各自形成独立组。"""
 
 
 class MessageReceiveConfig(ConfigBase):
@@ -1109,17 +1184,6 @@ class MessageReceiveConfig(ConfigBase):
     __ui_label__ = "消息接收"
     __ui_advanced__ = True
     __ui_order__ = 70
-
-    image_parse_threshold: int = Field(
-        default=5,
-        json_schema_extra={
-            "x-widget": "input",
-            "advanced": True,
-        },
-    )
-    """
-    单条消息图片数不超过这个值时才识图，避免图片太多拖慢处理。
-    """
 
     ban_words: set[str] = Field(
         default_factory=lambda: set(),
@@ -4001,6 +4065,13 @@ class LearningItem(ConfigBase):
 ExperimentalConfig.model_rebuild()
 
 
+class LearningBlacklistUser(ConfigBase):
+    """按平台和用户 ID 精确匹配学习来源，不影响正常聊天。"""
+
+    platform: str = Field(min_length=1, pattern=r"^\S+$", json_schema_extra={"label": "平台"})
+    user_id: str = Field(min_length=1, pattern=r"^\S+$", json_schema_extra={"label": "用户 ID"})
+
+
 class ExpressionConfig(ConfigBase):
     """表达配置类"""
 
@@ -4038,19 +4109,24 @@ class ExpressionConfig(ConfigBase):
     """写入表达方式前先让 AI 检查，减少学到奇怪内容。"""
 
     use_vector_expression: bool = Field(
-        default=True,
+        default=False,
         json_schema_extra={
             "label": {
-                "zh_CN": "使用向量表达",
-                "en_US": "Use vector expressions",
-                "ja_JP": "ベクトル表現を使用",
+                "zh_CN": "表达选择",
+                "en_US": "Expression selection",
+                "ja_JP": "表現の選択",
             },
-            "x-widget": "switch",
-            "x-row": "expression-learning-switches",
+            "x-widget": "discrete-slider",
+            "options": ["false", "true"],
+            "x-option-labels": {"false": "快速", "true": "精细"},
+            "x-option-descriptions": {
+                "false": "默认档位。加权随机抽取表达，直接供回复参考，不额外调用选择模型。",
+                "true": "使用向量召回，再由 LLM 按语境筛选，需要配置嵌入模型。",
+            },
             "advanced": False,
         },
     )
-    """开启后使用表达意图与嵌入召回，需要配置嵌入模型；关闭时使用随手候选。"""
+    """表达选择档位：false 为快速，加权随机抽样后直接注入，不额外调用选择 LLM；true 为精细，使用表达意图与嵌入召回，再由 LLM 筛选，需要配置嵌入模型。复古回复不使用表达选择。"""
 
     expression_vector_index_path: str = Field(
         default="data/expression_selection/expression_vector_index.json",
@@ -4130,6 +4206,12 @@ class ExpressionConfig(ConfigBase):
     )
     """_wrap_让多个群聊或私聊共享学到的表达方式。"""
 
+    learning_blacklist: List[LearningBlacklistUser] = Field(
+        default_factory=list,
+        json_schema_extra={"label": "学习黑名单", "x-widget": "custom"},
+    )
+    """不学习来源指向这些用户消息的表达；按平台和用户 ID 精确匹配，仍保留聊天上下文。"""
+
 
 class JargonConfig(ConfigBase):
     """黑话配置类"""
@@ -4171,6 +4253,12 @@ class JargonConfig(ConfigBase):
         },
     )
     """_wrap_让多个群聊或私聊共享学到的黑话。"""
+
+    learning_blacklist: List[LearningBlacklistUser] = Field(
+        default_factory=list,
+        json_schema_extra={"label": "学习黑名单", "x-widget": "custom"},
+    )
+    """不学习原消息指向这些用户的黑话；按平台和用户 ID 精确匹配，仍保留聊天上下文。"""
 
 
 class VoiceConfig(ConfigBase):
@@ -4251,9 +4339,9 @@ class EmojiCacheCleanupConfig(ConfigBase):
 class EmojiConfig(ConfigBase):
     """表情包配置类"""
 
-    __ui_label__ = "表情"
-    __ui_advanced__ = True
-    __ui_order__ = 80
+    __ui_parent__ = "expression"
+    __ui_label__ = "表情包"
+    __ui_sub_label__ = "表情包"
 
     use_new_send_logic: bool = Field(
         default=False,
@@ -4873,18 +4961,15 @@ class LogConfig(ConfigBase):
     )
     """每个聊天最多保留多少组 Prompt 预览。"""
 
-    maisaka_reply_effect_limit: int = Field(
-        default=256,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "回复效果记录数",
-                "en_US": "Reply effect record limit",
-                "ja_JP": "返信効果記録数",
-            },
-            "x-widget": "input",
-        },
-    )
-    """每个聊天最多保留多少条回复效果记录。"""
+
+    memory_diagnostics_enabled: bool = Field(default=True)
+    """启用独立内存诊断日志；最多四个 5 MiB 文件，修改后重启生效。"""
+
+    memory_diagnostics_deep_enabled: bool = Field(default=False)
+    """启用 tracemalloc 分配位置对比（每十分钟）；有额外内存和 CPU 开销，排查时开启，重启生效。"""
+
+    memory_diagnostics_interval_seconds: float = Field(default=60.0, ge=10.0)
+    """轻量内存诊断采集间隔（秒，至少 10 秒），修改后重启生效。"""
 
     event_loop_watchdog_enabled: bool = Field(
         default=False,
@@ -4916,10 +5001,12 @@ class LogConfig(ConfigBase):
         default_factory=lambda: [
             "faiss",
             "httpx",
+            "httpx2",
             "urllib3",
             "asyncio",
             "websockets",
             "httpcore",
+            "httpcore2",
             "requests",
             "sqlalchemy",
             "openai",
@@ -4978,6 +5065,19 @@ class DebugConfig(ConfigBase):
     __ui_parent__ = "log"
     __ui_label__ = "其他"
 
+    replyer_retro_prompt: bool = Field(
+        default=False,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "复古回复提示词",
+                "en_US": "Retro reply prompt",
+                "ja_JP": "レトロ返信プロンプト",
+            },
+            "x-widget": "switch",
+        },
+    )
+    """按旧版（0.12.x）的方式组织 replyer 提示词：全部回复指令集中在一份完整模板里，用块占位符填充，群聊/私聊/简短回复各用一套模板，并整段作为一条 user 消息发送。仅检查实际分配给 replyer 的模型：名称或标识包含 mai_replier（兼容 mai-replier），或为 v2p1-contract、v2p1-raw 时自动开启且不可关闭；解除这些模型的 replyer 分配后清除自动开关，未分配的模型不影响此设置。其他模型可手动开启。"""
+
     enable_console_input: bool = Field(
         default=True,
         json_schema_extra={
@@ -5017,18 +5117,6 @@ class DebugConfig(ConfigBase):
     )
     """保存 Planner、工具调用及聊天回想的完整推理记录，供 WebUI 查看，与终端显示独立。"""
 
-    enable_reply_effect_tracking: bool = Field(
-        default=False,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "记录回复效果",
-                "en_US": "Track reply effects",
-                "ja_JP": "返信効果を記録",
-            },
-            "x-widget": "switch",
-        },
-    )
-    """记录回复效果评分，方便观察回复质量。"""
 
     keep_prompt_preview_json_base64: bool = Field(
         default=False,
@@ -5292,34 +5380,7 @@ class WebUIConfig(ConfigBase):
             "x-widget": "switch",
         },
     )
-    """是否启动 WebUI 管理界面。"""
-
-    host: list[str] = Field(
-        default=["127.0.0.1", "::1"],
-        json_schema_extra={
-            "label": {
-                "zh_CN": "WebUI 主机",
-                "en_US": "WebUI host",
-                "ja_JP": "WebUI ホスト",
-            },
-            "x-widget": "tags",
-            "x-placeholder": "127.0.0.1",
-        },
-    )
-    """WebUI 监听地址列表；可同时绑定 IPv4 和 IPv6，例如 ["0.0.0.0", "::"]。"""
-
-    port: int = Field(
-        default=8001,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "WebUI 端口",
-                "en_US": "WebUI port",
-                "ja_JP": "WebUI ポート",
-            },
-            "x-widget": "input",
-        },
-    )
-    """WebUI 访问端口。"""
+    """是否加载 WebUI 管理界面和管理接口；关闭后公共 HTTP 文件传输仍然可用。"""
 
     mode: Literal["development", "production"] = Field(
         default="production",
@@ -5431,42 +5492,6 @@ class WebUIConfig(ConfigBase):
         },
     )
     """限制 WebUI 访问外部 URL，降低访问内网地址的风险。"""
-
-    enable_paragraph_content: bool = Field(
-        default=False,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "加载段落全文",
-                "en_US": "Load full paragraph content",
-                "ja_JP": "段落全文を読み込む",
-            },
-            "x-widget": "switch",
-        },
-    )
-    """知识图谱里是否加载段落全文；更完整但更占内存。"""
-
-
-class DatabaseConfig(ConfigBase):
-    """数据库配置类"""
-
-    __ui_parent__ = "debug"
-
-    save_binary_data: bool = Field(
-        default=False,
-        json_schema_extra={
-            "label": {
-                "zh_CN": "保存二进制原文件",
-                "en_US": "Save binary source files",
-                "ja_JP": "バイナリ原本を保存",
-            },
-            "x-widget": "switch",
-            "advanced": True,
-        },
-    )
-    """
-    是否保存语音等二进制原文件；更占空间，但方便以后重新识别。
-    """
-
 
 class MCPAuthorizationConfig(ConfigBase):
     """MCP HTTP 认证配置。"""
@@ -5580,16 +5605,6 @@ class MCPSamplingConfig(ConfigBase):
         },
     )
     """MCP Sampling 调用模型时使用的任务名。"""
-
-    include_context_support: bool = Field(
-        default=False,
-        json_schema_extra={
-            "label": {"zh_CN": "携带上下文（暂未支持）"},
-            "x-widget": "switch",
-            "advanced": True,
-        },
-    )
-    """是否允许 Sampling 请求带上下文。"""
 
     tool_support: bool = Field(
         default=False,

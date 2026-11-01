@@ -100,10 +100,10 @@
       "mcpSettings": "MCP 設定",
       "dataTransfer": "データ管理",
       "statistics": "詳細統計データ",
-      "replyEffects": "返信効果",
       "logViewer": "ログビューア",
       "reasoningProcess": "推論プロセス",
       "maisakaMonitor": "MaiSaka チャット監視",
+      "agent": "独立 Agent",
       "localChat": "ローカルチャット",
       "settings": "WebUI 設定"
     }
@@ -122,7 +122,7 @@
       "last_hour": "過去1時間", "last_15_minutes": "過去15分"
     },
     "tabs": { "trends": "データグラフ", "metrics": "指標トレンド" },
-    "sections": { "breakdowns": "分類統計", "distributions": "データ分布" },
+    "sections": { "breakdowns": "分類統計", "embeddings": "埋め込み統計", "distributions": "データ分布" },
     "breakdowns": {
       "taskGroups": "タスクグループ別",
       "models": "モデル別",
@@ -141,11 +141,19 @@
     "table": {
       "name": "名前", "requests": "呼び出し回数", "inputTokens": "入力Token", "outputTokens": "出力Token",
       "totalTokens": "総Token", "cacheHitTokens": "キャッシュヒットToken", "cacheMissTokens": "キャッシュミスToken",
-      "cacheHitRate": "キャッシュヒット率", "cost": "累計費用", "avgTime": "平均時間", "stdTime": "時間標準偏差",
+      "cacheHitRate": "キャッシュヒット率", "cost": "累計費用", "time": "所要時間",
       "callsPerReply": "返信あたりの呼び出し", "tokensPerReply": "返信あたりのToken", "tokensPerCall": "呼び出しあたりのToken",
       "chat": "連絡先/グループ", "messages": "メッセージ数"
     },
     "distributions": {
+      "metric": "統計指標",
+      "costs": "費用",
+      "tokens": "Token",
+      "ownerTokens": "呼び出し元別Token分布",
+      "modelTokens": "モデル別Token分布",
+      "moduleTokens": "モジュール別Token分布",
+      "requestTypeTokens": "リクエスト種別Token分布",
+      "chatTokens": "チャット別Token分布",
       "ownerCosts": "呼び出し元の費用分布", "modelCosts": "モデル費用分布", "moduleCosts": "モジュール費用分布",
       "requestTypeCosts": "リクエスト種別の費用分布", "chatMessages": "チャットメッセージ分布", "chatCosts": "チャットストリーム費用分布"
     },
@@ -161,6 +169,55 @@
     "logs": "ログ"
   },
   "chat": {
+    "computerDesktop": "デスクトップと操作引き継ぎ",
+    "computer": {
+      "desktopSetup": "dsh Desktop に接続",
+      "desktopInstall": "Desktop 同梱の dsh コマンドでブリッジをインストール（0.2.1-rc.2 以降）：",
+      "desktopConnect": "Desktop を起動または再起動します。ブリッジファイルとモデル選択は空欄で既定値を使います。タスクは Desktop の「麦麦」会話に表示され、麦麦を終了しても Desktop は終了しません。",
+      "dshSetup": "dsh の接続手順",
+      "dshInstall": "dsh が未インストールの場合：",
+      "dshModel": "dsh でモデルと API キーを設定（設定済みなら省略）：",
+      "dshEnable": "接続方式で dsh CLI を選択して有効にし、保存してから Agent ページでタスクを送信します。プログラムが見つからない場合、Windows では ACP 起動プログラムに dsh.cmd の絶対パスを指定します。",
+      "dshCommand": "プリセットの起動コマンド：",
+      "disabled": "Agent は無効です",
+      "reasoning": "思考履歴",
+      "connecting": "接続中",
+      "disabled": "コンピューター機能は無効です",
+      "stopped": "サンドボックス停止中",
+      "manual": "手動操作",
+      "paused": "判断を一時停止中",
+      "resting": "休憩中",
+      "autonomous": "自律探索中",
+      "running": "操作実行中",
+      "pause": "PC入力を一時停止",
+      "takeover": "操作を引き継ぐ",
+      "resume": "再開",
+      "stop": "サンドボックスを停止",
+      "restart": "サンドボックスを再作成",
+      "refresh": "画面を更新",
+      "help": "内部Planner、サブエージェント、外部AgentはこのPCを共有します。引き継ぐとクリック、右クリック、文字入力ができます。引き継ぎ時は実行中の操作をキャンセルし、自律入力を停止します。入力の一時停止では送信済みの操作は続行されます。",
+      "screen": "コンピューター画面",
+      "text": "操作を引き継いで文字を入力",
+      "type": "文字入力",
+      "enter": "Enter",
+      "takeoverFirst": "先に操作を引き継いでください",
+      "toolCall": "ツール呼び出し",
+      "toolResult": "実行結果",
+      "failed": "実行失敗",
+      "thought": "思考",
+      "eventCount": "{{count}} 件の記録",
+      "userMessage": "ユーザー",
+      "systemEvent": "自律起床",
+      "queued": "処理待ち",
+      "noEvents": "実行記録はありません",
+      "inputEvent": "入力と依頼",
+      "stepEvent": "モデルとツール",
+      "message": "Agent にタスクを依頼",
+      "send": "送信",
+      "thinking": "思考中",
+      "tool": "操作中",
+      "idle": "待機中"
+    },
     "setupTrial": {
       "title": "麦麦と話してみましょう",
       "description": "挨拶を送って、正常に返信できるか確認しましょう。",
@@ -332,6 +389,7 @@
     "title": "WebUI 設定",
     "description": "アプリの設定を管理する",
     "tabs": {
+      "general": "一般",
       "appearance": "外観",
       "security": "セキュリティ",
       "other": "その他",
@@ -576,6 +634,11 @@
       "confirmRerunSetup": "再構成を確認",
       "confirmRerunSetupDesc": "初回設定ウィザードに戻ります。システムの基本設定を再設定できます。続けますか？",
       "devToolsDesc": "以下の機能は開発・デバッグ目的のみです。クラッシュや異常動作を引き起こす可能性があります。",
+      "resetNotificationStates": "すべての通知状態をリセット",
+      "resetNotificationStatesDesc": "ニュースの既読記録、ホームのニュースバーの非表示状態、各ページの通知の非表示記録を消去し、再び表示されるようにします。完了したガイドはそのままです。",
+      "resetNotificationStatesAction": "リセット",
+      "notificationsResetDone": "通知状態をリセットしました",
+      "notificationsResetDoneDesc": "{{count}} 件の状態を消去しました。該当ページを開き直すと反映されます。",
       "alwaysShowUpdateButton": "更新ボタンを常に表示",
       "alwaysShowUpdateButtonDesc": "更新が検出されていなくても、右上に本体の更新ボタンを常に表示します。すぐに反映されます。",
       "alwaysShowUpdateNotice": "更新ログを常に表示",
@@ -825,6 +888,7 @@
     "defaults": {
       "personality": {
         "personality": "女子大生で、現在大学2年生。掲示板を見るのが好き。",
+        "behaviorStyle": "日常会話に自然に参加する。無理に話題を作らず、文脈を理解してから返信するか静かにするかを決める。",
         "replyStyle": "返信は淡々と、短めにし、中国語で話してください。自分の学科背景をわざと強調しないでください。Tieba、Zhihu、Weibo の返信スタイルを参考にできます。",
         "multipleReplyStyles": {
           "plain": "淡々として少し皮肉っぽく、とても短く口語的に返信します。Tieba や Weibo の返信スタイルを参考にできます。",
@@ -880,7 +944,7 @@
           "description": "このプラットフォーム上でのボットのアカウント識別子です"
         },
         "nickname": {
-          "label": "ニックネーム *",
+          "label": "ニックネーム",
           "placeholder": "ボットのニックネームを入力",
           "description": "ボットの主な呼び名です"
         },
@@ -893,15 +957,26 @@
         }
       },
       "personality": {
+        "expand": "{{field}}を拡大して編集",
+        "presets": {
+          "default": "デフォルト（マイマイ）",
+          "label": "キャラクター設定プリセット",
+          "description": "選択すると下の性格・行動スタイル・返信スタイルが置き換わります。適用後も自由に編集できます。"
+        },
         "personality": {
-          "label": "人格特性 *",
+          "label": "人格特性",
           "placeholder": "ボットの人格や設定を説明してください（120文字以内推奨）",
-          "description": "例：大学2年生の女子大生で、Tieba をよく見ている"
+          "description": "botの核となる性格を記述し、botの自己認識に影響します"
+        },
+        "behaviorStyle": {
+          "label": "行動スタイル",
+          "placeholder": "会話に参加するタイミングや、様子を見る・静かにする場面を記述",
+          "description": "botの行動を記述し、行動の仕方を決めます"
         },
         "replyStyle": {
-          "label": "話し方 *",
+          "label": "話し方",
           "placeholder": "ボットの話し方や表現の癖を説明してください",
-          "description": "例：返信は淡々と短めにし、中国語で話し、Tieba・Zhihu・Weibo の雰囲気を参考にする"
+          "description": "botの話し方や口調に直接影響します"
         },
         "multipleReplyStyle": {
           "label": "代替返信スタイル",
@@ -1111,9 +1186,8 @@
       "model": "モデル設定",
       "modelDesc": "モデルパラメーターを設定",
       "emoji": "絵文字管理",
-      "emojiDesc": "ボットの絵文字を管理",
       "expression": "表現管理",
-      "learningDesc": "学習した表現とスラングを管理",
+      "learningDesc": "学習した表現、スラング、絵文字を管理",
       "expressionDesc": "ボットの表現を管理",
       "person": "人物情報",
       "personDesc": "人物情報を管理",
@@ -1561,7 +1635,9 @@
       "openLink": "原文リンクを開く",
       "openPlugin": "プラグインを見る",
       "pinned": "ピン留め",
-      "empty": "ニュースはまだありません"
+      "empty": "ニュースはまだありません",
+      "dismiss": "ニュースバーを閉じる",
+      "next": "次のニュース"
     },
     "storage": {
       "title": "ストレージ使用量",
@@ -1653,5 +1729,49 @@
     "mobileTextEmpty": "未入力",
     "mobileTextCancel": "キャンセル",
     "mobileTextDone": "完了"
+  },
+  "dataManagement": {
+    "transfer": "バックアップとキャッシュ"
+  },
+  "files": {
+    "disabled": "ファイル機能は無効です。「機能」設定で有効にしてください。",
+    "openSettings": "機能設定を開く",
+    "title": "ファイル",
+    "description": "ファイルはチャットに紐づけ、必要時にダウンロードします。テキストを閲覧でき、アップロード・生成した原本は手動削除まで保持します。",
+    "storage": "使用量",
+    "reserved": "予約済み",
+    "maximum": "ファイル上限",
+    "chat": "チャット",
+    "allChats": "すべてのチャット",
+    "refresh": "更新",
+    "upload": "ファイルをアップロード",
+    "chooseChat": "アップロード先のチャットを選択してください。",
+    "download": "ダウンロード",
+    "read": "テキストを読む",
+    "sendTo": "チャットに送信…",
+    "confirmSend": "「{{name}}」にファイルを送信しますか？",
+    "clearCache": "キャッシュ削除",
+    "delete": "削除",
+    "confirmDelete": "「{{name}}」を削除しますか？ローカルの原本は復元できません。",
+    "empty": "添付ファイルはありません",
+    "previous": "前へ",
+    "next": "次へ",
+    "encoding": "文字コード",
+    "close": "閉じる",
+    "remote": "プラットフォームキャッシュ",
+    "original": "ローカル原本",
+    "removeAttachment": "送信待ちから除く（原本は保持）",
+    "uploadFailed": "アップロード失敗",
+    "state": {
+      "remote": "未ダウンロード",
+      "ready": "準備完了",
+      "failed": "失敗",
+      "uploading": "アップロード中",
+      "downloading": "ダウンロード中"
+    },
+    "delivery": {
+      "sent": "送信済み",
+      "unknown": "配信結果が不明です。再送前にチャットを確認してください。"
+    }
   }
 }

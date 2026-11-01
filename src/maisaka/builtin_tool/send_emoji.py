@@ -57,7 +57,9 @@ def get_tool_spec() -> ToolSpec:
         description="发送一个表情包来表达情绪，参与聊天。",
         parameters_schema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "msg_id": {"type": "string", "description": "要回复的消息编号；小黑盒发评论时必须指定主帖或评论消息。"},
+            },
         },
         provider_name="maisaka_builtin",
         provider_type="builtin",
@@ -202,9 +204,10 @@ async def _build_emoji_candidate_message(emojis: list[MaiEmoji]) -> InternalCont
 
     image_bytes_list = await asyncio.gather(*[_load_emoji_bytes(emoji) for emoji in emojis])
     merged_image_bytes = await asyncio.to_thread(_merge_emoji_tiles, list(image_bytes_list))
+    grid_rows, grid_columns = _calculate_grid_shape(len(image_bytes_list))
     raw_message = MessageSequence(
         [
-            TextComponent("请从这张 5x5 拼图中选择一个序号。"),
+            TextComponent(f"请从这张 {grid_rows}x{grid_columns} 拼图中选择一个序号。"),
             ImageComponent(binary_hash="", binary_data=merged_image_bytes),
         ]
     )
@@ -471,12 +474,20 @@ async def handle_tool(
 
     logger.info(f"{tool_ctx.runtime.log_prefix} 触发表情包发送工具")
 
+    target_id = str(invocation.arguments.get("msg_id") or "").strip() if isinstance(invocation.arguments, dict) else ""
+    target = tool_ctx.runtime.find_source_message_by_id(target_id) if target_id else None
+    if (target_id and target is None) or (tool_ctx.runtime.chat_stream.platform == "xiaoheihe" and target is None):
+        return tool_ctx.build_failure_result(
+            invocation.tool_name, "请指定可回复的主帖或评论消息编号 msg_id，无法猜测表情包发送目标。"
+        )
+
     try:
         send_result = await send_emoji_for_maisaka(
             stream_id=tool_ctx.runtime.session_id,
             requested_emotion=requested_emotion,
-            reasoning=tool_ctx.engine.last_reasoning_content,
+            reasoning=invocation.reasoning,
             context_texts=context_texts,
+            reply_message=target,
             emoji_selector=lambda _requested_emotion, reasoning, context_texts, sample_size: (
                 _select_emoji_with_sub_agent(
                     tool_ctx,

@@ -1,3 +1,4 @@
+import { AgentPage } from '@/routes/agent'
 import { ChatConversationHeader } from './ChatConversationHeader'
 import { PageFrame } from '@/components/ui/surface'
 import { ConversationTransition } from '@/components/ui/conversation'
@@ -14,10 +15,12 @@ import {
 import { MOBILE_GLASS_CLASS } from '@/components/layout/mobile-glass'
 import { useHideMobileTabBar } from '@/components/layout/mobile-nav-context'
 import { useMediaQuery } from '@/hooks/use-media-query'
+import { useFeatureFlags } from '@/hooks/use-feature-flags'
 import { useToast } from '@/hooks/use-toast'
 import { Button } from '@/components/ui/button'
 import { uploadWebuiUserAvatar } from '@/lib/avatar-url'
 import { chatWsClient } from '@/lib/chat-ws-client'
+import { uploadFile, type StoredFile } from '@/lib/files-api'
 import { getAllChatStreams } from '@/lib/chat-management-api'
 import {
   maisakaMonitorClient,
@@ -57,8 +60,8 @@ import type {
   WsMessage,
 } from './types'
 import {
+  INTERNAL_CHAT_USER_ID,
   getChatTabDisplayName,
-  getOrCreateUserId,
   getStoredUserAvatarVersion,
   getStoredUserName,
   getSavedVirtualTabs,
@@ -239,7 +242,7 @@ function matchesMonitorTarget(
 
   const eventPlatform = typeof data.platform === 'string' ? data.platform : ''
   const tabPlatform =
-    tab.type === 'virtual' ? tab.virtualConfig?.platform || '' : tab.sessionInfo.platform || 'webui'
+    tab.type === 'virtual' ? tab.virtualConfig?.platform || '' : tab.sessionInfo.platform || 'internal'
   return !eventPlatform || !tabPlatform || eventPlatform === tabPlatform
 }
 
@@ -262,6 +265,11 @@ export function ChatPage() {
   const setupTrial = useRouterState({
     select: (state) => new URLSearchParams(state.location.searchStr).get('setupTrial') === 'true',
   })
+  const agentParam = useRouterState({
+    select: (state) => new URLSearchParams(state.location.searchStr).get('agent') === 'true',
+  })
+  const [agentSelected, setAgentSelected] = useState(agentParam)
+  const [handledAgentParam, setHandledAgentParam] = useState(agentParam)
   const [trialReplied, setTrialReplied] = useState(false)
   const trialMessagePending = useRef(false)
   const canOpenMessagePlatform = typeof window.maibotDesktopHost?.openMessagePlatform === 'function'
@@ -381,8 +389,13 @@ export function ChatPage() {
   // 手机端观察页的工具栏挂到悬浮顶栏里
   const [observedToolbarSlot, setObservedToolbarSlot] = useState<HTMLDivElement | null>(null)
   const [mobileRoomOpen, setMobileRoomOpen] = useState(
-    () => setupTrial || getRequestedObservedSessionId() !== null
+    () => setupTrial || agentParam || getRequestedObservedSessionId() !== null
   )
+  if (agentParam !== handledAgentParam) {
+    setHandledAgentParam(agentParam)
+    setAgentSelected(agentParam)
+    if (agentParam) setMobileRoomOpen(true)
+  }
   useHideMobileTabBar(isMobileChat && mobileRoomOpen)
 
   // 「麦麦实时」条等入口通过 ?observe= 直达某个聊天流；已在聊天页时也要跟着切换
@@ -393,6 +406,7 @@ export function ChatPage() {
   if (observeParam !== handledObserveParam) {
     setHandledObserveParam(observeParam)
     if (observeParam) {
+      setAgentSelected(false)
       setActiveObservedSessionId(observeParam)
       setMobileRoomOpen(true)
     }
@@ -404,6 +418,12 @@ export function ChatPage() {
   // 通用状态
   const [inputValue, setInputValue] = useState('')
   const [selectedImages, setSelectedImages] = useState<ChatImageAttachment[]>([])
+  const { flags: featureFlags } = useFeatureFlags()
+  const agentEnabled = featureFlags?.agent === true
+  const agentActive = agentEnabled && agentSelected
+  const filesEnabled = featureFlags?.files === true
+  const [filesByTab, setFilesByTab] = useState<Record<string, StoredFile[]>>({})
+  const [uploadingFiles, setUploadingFiles] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(true)
   const [userName, setUserName] = useState(getStoredUserName())
   const [userAvatarVersion, setUserAvatarVersion] = useState(getStoredUserAvatarVersion)
@@ -411,8 +431,8 @@ export function ChatPage() {
   // 页内聊天流设置弹窗：非空时打开
   const [settingsChat, setSettingsChat] = useState<ChatStreamSettingsTarget | null>(null)
 
-  // 持久化用户 ID
-  const [userId] = useState(getOrCreateUserId)
+  // 网页聊天室统一以主人身份进入 Bot 内部统一聊天
+  const userId = INTERNAL_CHAT_USER_ID
 
   const messageIdCounterRef = useRef(0)
   const monitorStatusesRef = useRef<Map<string, StageStatusEvent>>(new Map())
@@ -452,14 +472,13 @@ export function ChatPage() {
   }, [])
 
   const handleSessionMessage = useCallback(
-    (
-      tabId: string,
-      tabType: 'webui' | 'virtual',
-      config: VirtualIdentityConfig | undefined,
-      data: WsMessage
-    ) => {
+    (tabId: string, tabType: 'webui' | 'virtual', data: WsMessage) => {
       switch (data.type) {
         case 'session_info':
+          if (tabType === 'webui' && data.user_name) {
+            setUserName(data.user_name)
+            saveUserName(data.user_name)
+          }
           setTabs((prev) =>
             prev.map((tab) => {
               if (tab.id !== tabId) {
@@ -498,6 +517,20 @@ export function ChatPage() {
           )
           break
 
+        case 'nickname_updated':
+          if (tabType === 'webui' && data.user_name) {
+            setUserName(data.user_name)
+            saveUserName(data.user_name)
+            setTabs((prev) =>
+              prev.map((tab) =>
+                tab.id === tabId
+                  ? { ...tab, sessionInfo: { ...tab.sessionInfo, user_name: data.user_name } }
+                  : tab
+              )
+            )
+          }
+          break
+
         case 'system':
           addMessageToTab(tabId, {
             id: generateMessageId('sys'),
@@ -509,12 +542,9 @@ export function ChatPage() {
 
         case 'user_message': {
           updateTab(tabId, { runtimeStatus: null })
-          const senderUserId = data.sender?.user_id
-          const currentUserId = tabType === 'virtual' && config ? config.userId : userId
-
-          const normalizeSenderId = senderUserId ? senderUserId.replace(/^webui_user_/, '') : ''
-          const normalizeCurrentId = currentUserId ? currentUserId.replace(/^webui_user_/, '') : ''
-          if (normalizeSenderId && normalizeCurrentId && normalizeSenderId === normalizeCurrentId) {
+          // 同一身份可能有多个网页和桌宠等插件界面同时在线，只跳过本标签页自己发出的回显
+          const ownSessionId = tabsRef.current.find((tab) => tab.id === tabId)?.sessionInfo.session_id
+          if (data.origin && data.origin === ownSessionId) {
             break
           }
 
@@ -537,12 +567,12 @@ export function ChatPage() {
             type: 'user',
             content: data.content || '',
             message_type:
-              (data.images && data.images.length > 0) || (data.emojis && data.emojis.length > 0)
+              (data.images && data.images.length > 0) || (data.emojis && data.emojis.length > 0) || (data.files && data.files.length > 0)
                 ? 'rich'
                 : 'text',
             segments:
-              (data.images && data.images.length > 0) || (data.emojis && data.emojis.length > 0)
-                ? buildMessageSegments(data.raw_content || '', data.images || [], data.emojis || [])
+              (data.images && data.images.length > 0) || (data.emojis && data.emojis.length > 0) || (data.files && data.files.length > 0)
+                ? [...buildMessageSegments(data.raw_content || '', data.images || [], data.emojis || []), ...(data.files || []).map(file => ({ type: 'file' as const, data: file }))]
                 : undefined,
             timestamp: data.timestamp || Date.now() / 1000,
             sender: data.sender,
@@ -674,17 +704,17 @@ export function ChatPage() {
           break
       }
     },
-    [addMessageToTab, t, toast, updateTab, userId]
+    [addMessageToTab, t, toast, updateTab]
   )
 
   const ensureSessionListener = useCallback(
-    (tabId: string, tabType: 'webui' | 'virtual', config?: VirtualIdentityConfig) => {
+    (tabId: string, tabType: 'webui' | 'virtual') => {
       if (sessionUnsubscribeMapRef.current.has(tabId)) {
         return
       }
 
       const unsubscribe = chatWsClient.onSessionMessage(tabId, (message) => {
-        handleSessionMessage(tabId, tabType, config, message as unknown as WsMessage)
+        handleSessionMessage(tabId, tabType, message as unknown as WsMessage)
       })
       sessionUnsubscribeMapRef.current.set(tabId, unsubscribe)
     },
@@ -693,7 +723,7 @@ export function ChatPage() {
 
   const openSessionForTab = useCallback(
     async (tabId: string, tabType: 'webui' | 'virtual', config?: VirtualIdentityConfig) => {
-      ensureSessionListener(tabId, tabType, config)
+      ensureSessionListener(tabId, tabType)
       setIsLoadingHistory(true)
 
       try {
@@ -904,7 +934,8 @@ export function ChatPage() {
 
   // 发送消息到当前活动标签页
   const sendMessage = useCallback(async () => {
-    if ((!inputValue.trim() && selectedImages.length === 0) || !activeTab?.isConnected) {
+    const filesToSend = filesEnabled ? filesByTab[activeTabId] || [] : []
+    if (uploadingFiles || (!inputValue.trim() && selectedImages.length === 0 && filesToSend.length === 0) || !activeTab?.isConnected) {
       return
     }
 
@@ -931,9 +962,9 @@ export function ChatPage() {
       id: generateMessageId('user'),
       type: 'user',
       content: messageContent,
-      message_type: imagesToSend.length > 0 ? 'rich' : 'text',
+      message_type: imagesToSend.length > 0 || filesToSend.length > 0 ? 'rich' : 'text',
       segments:
-        imagesToSend.length > 0 ? buildMessageSegments(messageContent, imagesToSend) : undefined,
+        [...buildMessageSegments(messageContent, imagesToSend), ...filesToSend.map(file => ({ type: 'file' as const, data: file }))],
       timestamp: currentTimestamp,
       sender: {
         name: displayName,
@@ -944,10 +975,12 @@ export function ChatPage() {
 
     setInputValue('')
     setSelectedImages([])
+    setFilesByTab(previous => ({ ...previous, [activeTabId]: [] }))
 
     try {
       if (setupTrial && activeTabId === 'webui-default') trialMessagePending.current = true
       await chatWsClient.sendMessage(activeTabId, messageContent, displayName, {
+        files: filesToSend.map(file => ({ file_ref: file.file_ref, name: file.name })),
         images: imagesToSend.map((image) => ({
           name: image.name,
           mime_type: image.mime_type,
@@ -973,7 +1006,23 @@ export function ChatPage() {
         variant: 'destructive',
       })
     }
-  }, [activeTab, activeTabId, addMessageToTab, inputValue, selectedImages, setupTrial, t, toast, userName])
+  }, [activeTab, activeTabId, addMessageToTab, inputValue, selectedImages, filesByTab, filesEnabled, uploadingFiles, setupTrial, t, toast, userName])
+
+  const handleAddFiles = async (files: FileList) => {
+    if (!filesEnabled) return
+    const sessionId = activeTab?.sessionInfo.session_id
+    if (!sessionId || uploadingFiles) return
+    const tabId = activeTabId
+    setUploadingFiles(true)
+    try {
+      for (const file of Array.from(files).slice(0, Math.max(0, 6 - (filesByTab[tabId]?.length || 0)))) {
+        const stored = await uploadFile(file, sessionId, true)
+        setFilesByTab(previous => ({ ...previous, [tabId]: [...(previous[tabId] || []), stored] }))
+      }
+    } catch (e) {
+      toast({ title: t('files.uploadFailed'), description: String(e), variant: 'destructive' })
+    } finally { setUploadingFiles(false) }
+  }
 
   const sendUserEmoji = useCallback(
     async (item: UserEmojiItem) => {
@@ -1071,11 +1120,11 @@ export function ChatPage() {
       setUserName(trimmed)
       saveUserName(trimmed)
 
-      if (activeTab?.isConnected) {
-        void chatWsClient.updateNickname(activeTabId, trimmed)
+      if (tabsRef.current.find((tab) => tab.id === 'webui-default')?.isConnected) {
+        void chatWsClient.updateNickname('webui-default', trimmed)
       }
     },
-    [activeTab?.isConnected, activeTabId, t]
+    [t]
   )
 
   const handleUpdateUserAvatar = useCallback(
@@ -1154,11 +1203,13 @@ export function ChatPage() {
 
   // 切换标签页
   const switchTab = useCallback((tabId: string) => {
+    setAgentSelected(false)
     setActiveObservedSessionId(null)
     setActiveTabId(tabId)
   }, [])
 
   const selectObservedSession = useCallback((sessionId: string) => {
+    setAgentSelected(false)
     setSelectedObservedSession(sessionId)
     setActiveObservedSessionId(sessionId)
   }, [setSelectedObservedSession])
@@ -1190,6 +1241,9 @@ export function ChatPage() {
         transition={{ type: 'spring', stiffness: 360, damping: 30, mass: 0.75 }}
       >
         <ChatWorkspaceSidebar
+          agentEnabled={agentEnabled}
+          agentActive={agentActive}
+          onSelectAgent={() => setAgentSelected(true)}
           tabs={tabs}
           activeTabId={activeTabId}
           activeObservedSessionId={activeObservedSessionId}
@@ -1208,6 +1262,11 @@ export function ChatPage() {
       {!mobileRoomOpen && (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col md:hidden">
           <MobileChatList
+            agentEnabled={agentEnabled}
+            onOpenAgent={() => {
+              setAgentSelected(true)
+              setMobileRoomOpen(true)
+            }}
             tabs={tabs}
             observedSessions={knownSessions}
             observedSessionsError={knownChatStreamsError}
@@ -1262,6 +1321,14 @@ export function ChatPage() {
             )}
           </section>
         )}
+        {agentActive ? (
+          <>
+            <div className="md:hidden">
+              <Button variant="ghost" onClick={() => setMobileRoomOpen(false)}>{t('chat.mobile.back')}</Button>
+            </div>
+            <div className="min-h-0 flex-1"><AgentPage /></div>
+          </>
+        ) : (
         <ConversationTransition mode={activeObservedSessionId ? 'observe' : 'chat'}>
         {/* 移动端对话页顶栏：返回列表、会话名片与单个操作；观察页的顶栏悬浮在时间线上方 */}
         <div className="md:hidden">
@@ -1350,13 +1417,16 @@ export function ChatPage() {
             />
 
             <ChatComposer
+              files={filesEnabled ? filesByTab[activeTabId] || [] : []}
+              onAddFiles={filesEnabled ? handleAddFiles : undefined}
+              onRemoveFile={ref => setFilesByTab(previous => ({ ...previous, [activeTabId]: (previous[activeTabId] || []).filter(file => file.file_ref !== ref) }))}
               value={inputValue}
               onChange={setInputValue}
               onAddImages={handleAddImages}
               onRemoveImage={handleRemoveImage}
               onSendEmoji={sendUserEmoji}
               onSend={() => void sendMessage()}
-              disabled={!activeTab?.isConnected}
+              disabled={!activeTab?.isConnected || uploadingFiles}
               images={selectedImages}
               isConnected={!!activeTab?.isConnected}
               userId={userId}
@@ -1369,6 +1439,7 @@ export function ChatPage() {
           </>
         )}
         </ConversationTransition>
+        )}
       </motion.div></PageFrame>
 
       <ChatStreamSettingsDialog

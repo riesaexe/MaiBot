@@ -4,20 +4,22 @@
 WebUI 只负责检查更新与登记更新请求；代码与依赖的实际更新由 Runner 在重启间隙执行。
 """
 
-from dataclasses import asdict, replace
-from typing import List, Literal, Optional
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import asyncio
+import json
 
 from src.common.logger import get_logger
 from src.common.self_update import (
     OFFICIAL_REPOSITORY_URL,
     SelfUpdateError,
     UpdateCheck,
-    check_for_update,
     clear_pending_update,
     inspect_local,
     read_last_result,
@@ -25,13 +27,24 @@ from src.common.self_update import (
 )
 from src.webui.dependencies import require_auth
 from src.webui.routers.system import schedule_restart
-from src.webui.utils.network_security import validate_public_url
+from src.common.network_security import validate_public_url
 
-router = APIRouter(prefix="/system/self-update", tags=["system"], dependencies=[Depends(require_auth)])
+from src.webui.services.self_update_cache import self_update_cache
+
+
+@asynccontextmanager
+async def _cache_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    self_update_cache.start()
+    try:
+        yield
+    finally:
+        self_update_cache.stop()
+
+
+router = APIRouter(
+    prefix="/system/self-update", tags=["system"], dependencies=[Depends(require_auth)], lifespan=_cache_lifespan,
+)
 logger = get_logger("webui_self_update")
-
-# 最近一次联网检查的结论；状态接口据此展示新版本信息而不必每次联网。
-_last_check: Optional[UpdateCheck] = None
 
 
 class SelfUpdateCommitResponse(BaseModel):
@@ -100,6 +113,12 @@ class SelfUpdateSourceRequest(BaseModel):
                 raise SelfUpdateError("invalid_source", str(exc)) from exc
 
 
+class SelfUpdateCheckRequest(SelfUpdateSourceRequest):
+    """手动检查默认强制刷新，自动检查显式传 false。"""
+
+    force: bool = True
+
+
 class SelfUpdateApplyRequest(SelfUpdateSourceRequest):
     """执行更新请求。"""
 
@@ -146,48 +165,82 @@ def get_self_update_status() -> SelfUpdateStatusResponse:
     """获取自更新状态；只读取本地仓库，不联网。"""
 
     try:
-        local = inspect_local()
-        if local.blocker is not None:
-            return _build_status_response(UpdateCheck(local=local, blockers=[local.blocker]))
-
-        cached = _last_check
-        if (
-            cached is None
-            or cached.latest_commit is None
-            or cached.checked_at is None
-            or cached.local.branch != local.branch
-        ):
-            return _build_status_response(UpdateCheck(local=local))
-        # 本地状态可能在检查之后变化（如还原了本地改动），用最新的本地状态重新评估。
-        if cached.local.commit != local.commit or cached.local.version != local.version:
-            return _build_status_response(UpdateCheck(local=local))
-        blockers = [item for item in cached.blockers if item != "dirty_worktree"]
-        if local.dirty_files:
-            blockers.append("dirty_worktree")
-        check = replace(cached, local=local, blockers=blockers)
-        return _build_status_response(check)
+        return _build_status_response(self_update_cache.peek(inspect_local()))
     except SelfUpdateError as e:
         logger.exception(f"获取自更新状态失败: {e.message}")
         raise HTTPException(status_code=500, detail=e.message) from e
 
 
 @router.post("/check", response_model=SelfUpdateStatusResponse)
-def check_self_update(request: SelfUpdateSourceRequest) -> SelfUpdateStatusResponse:
-    """联网检查官方仓库是否有新版本。"""
+def check_self_update(request: SelfUpdateCheckRequest) -> SelfUpdateStatusResponse:
+    """自动检查优先复用 60 分钟缓存，手动检查强制联网。"""
 
-    global _last_check
-
-    # 本体更新按本次选择使用一个来源，与插件源及项目依赖安装源独立。
+    # 检查缓存与插件市场独立；源码元数据并发查询，下载仍保留本次所选来源。
     try:
         request.validate_prefix()
-        check = check_for_update(source_id=request.source_id, custom_prefix=request.custom_prefix)
+        check = self_update_cache.get(
+            force=request.force, source_id=request.source_id, custom_prefix=request.custom_prefix,
+        )
     except SelfUpdateError as e:
         logger.warning(f"检查更新失败: {e.message}")
         status_code = 502 if e.code == "fetch_failed" else 400 if e.code == "invalid_source" else 500
         raise HTTPException(status_code=status_code, detail=e.message) from e
 
-    _last_check = check
     return _build_status_response(check)
+
+
+async def _stream_check_events(request: SelfUpdateCheckRequest) -> AsyncIterator[str]:
+    """同步检查在线程中执行，向页面推送真实阶段、最终结果或完整错误。"""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+    active = True
+
+    def emit(event: Dict[str, Any]) -> None:
+        if active:
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    def progress(message: str) -> None:
+        logger.info(f"检查更新进度: {message}")
+        emit({"type": "progress", "message": message})
+
+    def run() -> None:
+        try:
+            request.validate_prefix()
+            check = self_update_cache.get(
+                force=request.force, source_id=request.source_id, custom_prefix=request.custom_prefix,
+                on_progress=progress,
+            )
+            emit({"type": "result", "status": _build_status_response(check).model_dump()})
+        except SelfUpdateError as exc:
+            logger.warning(f"检查更新失败: {exc.message}")
+            emit({"type": "error", "message": exc.message})
+        except Exception as exc:
+            logger.exception("检查更新异常")
+            emit({"type": "error", "message": f"检查更新异常：{type(exc).__name__}: {exc}"})
+
+    task = asyncio.create_task(asyncio.to_thread(run))
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=10)
+            except TimeoutError:
+                # 保持长请求可见且不被反向代理按空闲连接关闭，心跳不代表业务进度。
+                event = {"type": "heartbeat"}
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+            if event["type"] in {"result", "error"}:
+                break
+    finally:
+        active = False
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@router.post("/check-stream")
+def stream_check_self_update(request: SelfUpdateCheckRequest) -> StreamingResponse:
+    return StreamingResponse(
+        _stream_check_events(request), media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/apply", response_model=SelfUpdateApplyResponse)

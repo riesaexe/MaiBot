@@ -1,3 +1,4 @@
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
@@ -11,6 +12,7 @@ from src.chat.replyer.expression_vector_index import ExpressionVectorIndexUpsert
 from src.chat.utils.utils import is_bot_self
 from src.common.data_models.expression_data_model import MaiExpression
 from src.common.data_models.llm_service_data_models import LLMResponseResult
+from src.common.data_models.message_component_data_model import MessageSequence, TextComponent
 from src.common.database.database import get_db_session
 from src.common.database.database_model import Expression, ModifiedBy
 from src.common.logger import get_logger
@@ -25,6 +27,8 @@ from src.services.llm_service import LLMServiceClient
 from .expression_review_store import append_ai_review_log
 from .expression_style_utils import normalize_expression_style_for_learning
 from .expression_utils import check_expression_suitability, parse_expression_response
+from .learning_text import extract_learning_text
+from .pending_learning_buffer import PendingLearningBuffer
 
 if TYPE_CHECKING:
     from src.chat.message_receive.message import SessionMessage
@@ -194,6 +198,10 @@ class ExpressionLearner:
 
         self.session_id = session_id
         self.min_messages_for_extraction = 10
+        self.pending_messages: PendingLearningBuffer["SessionMessage"] = PendingLearningBuffer(lambda item: item.message_id)
+        self.learning_status = "pending"
+        self.learning_retry_blocked = False
+        self.learning_detail = ""
 
     @staticmethod
     def _get_runtime_manager() -> Any:
@@ -272,6 +280,10 @@ class ExpressionLearner:
             normalized_expressions.append((situation, style, source_id))
         return normalized_expressions
 
+    def collect_context_messages(self, context_messages: Sequence["LLMContextMessage"]) -> None:
+        """先收集真实素材；间隔或并发条件不允许执行时也不丢掉本轮消息。"""
+        self.pending_messages.extend(self._extract_session_messages_from_context(context_messages))
+
     async def learn_from_context_messages(
         self,
         context_messages: Sequence["LLMContextMessage"],
@@ -284,16 +296,19 @@ class ExpressionLearner:
         规划器思考等上下文消息不会进入表达学习。
         """
 
-        source_messages = self._extract_session_messages_from_context(context_messages)
-        if not source_messages:
-            logger.debug("裁切历史中没有可用于表达学习的真实聊天消息")
-            return False
+        self.learning_retry_blocked = False
+        self.collect_context_messages(context_messages)
+        source_messages = self.pending_messages.snapshot()
         if len(source_messages) < self.min_messages_for_extraction:
-            logger.debug(
-                f"裁切历史可学习消息不足: 可学习={len(source_messages)} 阈值={self.min_messages_for_extraction}"
+            self.learning_status = "waiting" if source_messages else "skipped"
+            self.learning_detail = (
+                self.pending_messages.waiting_detail(self.min_messages_for_extraction)
+                if source_messages else "裁切历史中没有可学习的真实聊天消息"
             )
+            logger.debug(self.learning_detail)
             return False
 
+        self.learning_status, self.learning_detail = "running", ""
         return await self._learn_from_session_messages(
             source_messages,
             learned_contents=learned_contents,
@@ -335,6 +350,8 @@ class ExpressionLearner:
         learning_session_id = self._resolve_learning_session_id(pending_messages)
         if learning_session_id is None:
             logger.warning(f"表达学习已跳过：无法解析到有效聊天流，learner_session_id={self.session_id}")
+            self.learning_retry_blocked = True
+            self.learning_status, self.learning_detail = "skipped", "无法解析到有效聊天流，素材已保留"
             return False
         if learning_session_id != self.session_id:
             logger.info(
@@ -344,6 +361,14 @@ class ExpressionLearner:
 
         acquire_result = await expression_learning_batch_gate.acquire(learning_session_id)
         if not acquire_result.acquired:
+            reasons = {
+                "session_busy": "当前会话已有学习批次正在运行",
+                "global_limit": f"全局学习并发已满（{acquire_result.active_count}/{acquire_result.max_count}）",
+                "max_expression_learner <= 0": "学习并发配置小于或等于 0",
+            }
+            self.learning_retry_blocked = acquire_result.max_count <= 0
+            self.learning_status = "skipped" if self.learning_retry_blocked else "waiting"
+            self.learning_detail = reasons[acquire_result.reason] + f"，已保留 {len(self.pending_messages)} 条素材等待重试"
             if acquire_result.reason == "session_busy":
                 logger.info(f"{learning_session_id} 已有表达学习批次正在运行，放弃新的批次")
             elif acquire_result.reason == "global_limit":
@@ -359,6 +384,7 @@ class ExpressionLearner:
                 )
             return False
 
+        self.pending_messages.discard(pending_messages)
         try:
             return await self._run_learning_batch(
                 pending_messages,
@@ -377,7 +403,8 @@ class ExpressionLearner:
     ) -> bool:
         """执行已经获得并发闸门的表达学习批次。"""
 
-        readable_message = "聊天记录将在后续多条 user message 中给出；请以每条消息中的 source_id 作为来源行编号。"
+        pending_messages = self._prepare_learning_messages(pending_messages)
+        readable_message = "聊天记录将在后续多条 user message 中给出；请以每条消息中的 id 作为来源行编号。"
         prompt_template = prompt_manager.get_prompt("learn_style")
         prompt_template.add_context("bot_name", global_config.bot.nickname)
         prompt_template.add_context("chat_str", readable_message)
@@ -385,6 +412,9 @@ class ExpressionLearner:
 
         try:
             learning_messages = await self._build_multi_learning_messages(pending_messages, prompt)
+            if len(learning_messages) == 2:
+                self.learning_status, self.learning_detail = "no_results", "没有可学习的文字正文"
+                return False
             generation_result = await express_learn_model.generate_response_with_context(
                 lambda _client: learning_messages,
                 session_id=learning_session_id,
@@ -408,6 +438,7 @@ class ExpressionLearner:
 
         if len(expressions) > 20:
             logger.info(f"表达方式数量超过20: {len(expressions)}")
+            self.learning_status, self.learning_detail = "no_results", f"模型返回 {len(expressions)} 条表达，超过单批 20 条限制"
             expressions = []
 
         after_extract_result = await self._get_runtime_manager().invoke_hook(
@@ -419,6 +450,7 @@ class ExpressionLearner:
         )
         if after_extract_result.aborted:
             logger.info(f"{self.session_id} 表达方式选择 Hook 中止")
+            self.learning_status, self.learning_detail = "skipped", "表达候选被 expression.learn.after_extract Hook 中止"
             return False
 
         after_extract_kwargs = after_extract_result.kwargs
@@ -428,6 +460,8 @@ class ExpressionLearner:
 
         if not expressions:
             logger.info("没有可学习的表达方式")
+            if not self.learning_detail:
+                self.learning_status, self.learning_detail = "no_results", "模型未提取出表达候选"
             return False
 
         # logger.info(f"可学习的表达方式: {expressions}")
@@ -435,6 +469,7 @@ class ExpressionLearner:
         learnt_expressions = self._filter_expressions(expressions, pending_messages)
         if not learnt_expressions:
             logger.info("没有可学习的表达方式通过过滤")
+            self.learning_status, self.learning_detail = "no_results", f"{len(expressions)} 条表达候选均未通过内容或来源校验"
             return False
 
         learnt_expressions_str = "\n".join(f"{situation}->{style}" for situation, style in learnt_expressions)
@@ -489,6 +524,11 @@ class ExpressionLearner:
             f"[{session_display_name}] 表达学习完成 "
             f"候选={len(learnt_expressions)} 写入={len(written_expressions)}"
         )
+        self.learning_status = "completed" if written_expressions else "no_results"
+        self.learning_detail = (
+            f"写入 {len(written_expressions)} 条表达" if written_expressions
+            else f"{len(learnt_expressions)} 条有效候选均被写入 Hook、审核或写入校验阻止"
+        )
         return bool(written_expressions)
 
     def _resolve_learning_session_id(self, messages: List["SessionMessage"]) -> Optional[str]:
@@ -523,42 +563,56 @@ class ExpressionLearner:
         )
         return None
 
+    @staticmethod
+    def _prepare_learning_messages(messages: List["SessionMessage"]) -> List["SessionMessage"]:
+        """为学习创建仅含顶层文字的消息副本，不解析其他组件。"""
+
+        learning_messages: List["SessionMessage"] = []
+        for message in messages:
+            # 仅白名单文字组件，引用、转发、图片描述和语音转写都不作为学习正文。
+            text = extract_learning_text(message.raw_message)
+            # 不改写聊天上下文中的原始组件或完整文本；请求构建与来源过滤共用这些副本。
+            learning_message = copy(message)
+            learning_message.raw_message = MessageSequence([TextComponent(text)] if text else [])
+            learning_message.processed_plain_text = text
+            learning_messages.append(learning_message)
+        return learning_messages
+
     async def _build_multi_learning_messages(
         self,
         messages: List["SessionMessage"],
         system_prompt: str,
     ) -> List[ContextItem]:
-        """构造表达学习使用的多 message 请求。"""
+        """从已准备的纯文字副本构造学习请求，不触发识图或其他消息处理。"""
 
         learning_messages = [
             ContextItemBuilder()
             .set_role(RoleType.System)
             .add_text_content(
                 f"{system_prompt}\n\n"
-                "注意：聊天记录会在后续多条 user message 中给出。每条消息内的 source_id "
+                "注意：聊天记录会在后续多条 user message 中给出。每条消息内的 id "
                 "是本轮学习的来源编号；speaker=SELF 的消息只作为上下文，不要从 SELF 的发言中学习。"
             )
             .build()
         ]
 
         for index, message in enumerate(messages, start=1):
-            await message.process()
             user_info = message.message_info.user_info
             speaker_name = user_info.user_cardname or user_info.user_nickname or "未知用户"
             speaker_kind = "SELF" if is_bot_self(message.platform, user_info.user_id) else "USER"
             content = (message.processed_plain_text or "").strip()
             if not content:
-                content = "[空消息]"
+                # 跳过空素材但保留原始编号，避免后置来源过滤对应到其他消息。
+                continue
             learning_messages.append(
                 ContextItemBuilder()
                 .set_role(RoleType.User)
                 .add_text_content(
                     "\n".join(
                         [
-                            f"[source_id:{index}]",
+                            f"[id:{index}]",
                             f"[speaker:{speaker_kind}]",
                             f"[name:{speaker_name}]",
-                            f"[time:{message.timestamp.strftime('%H:%M:%S')}]",
                             "[content]",
                             content,
                         ]
@@ -636,13 +690,20 @@ class ExpressionLearner:
             source_id_str = source_id.strip()
             if not source_id_str.isdigit():
                 continue  # 无效的来源行编号，跳过
-            line_index = int(source_id_str) - 1  # 多 message 构造时的 source_id 从 1 开始
+            line_index = int(source_id_str) - 1  # 多 message 构造时的 id 从 1 开始
             if line_index < 0 or line_index >= len(messages):
                 continue  # 超出范围，跳过
             # 当前行的原始消息
             current_msg = messages[line_index]
             # 过滤掉从 bot 自己发言中提取到的表达方式
             if is_bot_self(current_msg.platform, current_msg.message_info.user_info.user_id):
+                continue
+            # 按真实来源消息匹配黑名单，保留其他消息的学习及上下文。
+            if any(
+                user.platform == current_msg.platform
+                and user.user_id == current_msg.message_info.user_info.user_id
+                for user in global_config.expression.learning_blacklist
+            ):
                 continue
             # 过滤掉无上下文的表达方式
             context = (current_msg.processed_plain_text or "").strip()

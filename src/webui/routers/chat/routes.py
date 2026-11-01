@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, delete, func
 from sqlmodel import col, select
+import asyncio
 import json
 import tomlkit
 
@@ -25,6 +26,7 @@ from src.common.database.database_model import (
     ToolRecord,
 )
 from src.common.logger import get_logger
+from src.common.runtime_loop import run_on_main_loop
 from src.common.utils.utils_config import (
     ChatConfigUtils,
     ExpressionConfigUtils,
@@ -43,10 +45,10 @@ from src.webui.dependencies import require_auth
 from src.webui.utils.toml_utils import save_toml_with_format
 
 from .service import (
-    WEBUI_CHAT_PLATFORM,
+    INTERNAL_CHAT_USER_ID,
+    INTERNAL_CHAT_PLATFORM,
     chat_history,
     chat_manager,
-    normalize_webui_user_id,
 )
 
 logger = get_logger("webui.chat")
@@ -60,6 +62,12 @@ class TalkFrequencyUpdateRequest(BaseModel):
     previous_time: Optional[str] = None
     time: str = Field(default="*")
     value: float = Field(ge=0, le=1)
+
+
+class PrivateReplyPauseUpdateRequest(BaseModel):
+    """单个私聊暂停设置；null 表示恢复跟随全局。"""
+
+    paused: Optional[bool]
 
 
 class LearningUpdateRequest(BaseModel):
@@ -494,7 +502,19 @@ def _get_talk_rule_details(chat_session: ChatSession) -> Dict[str, Any]:
     session_id = chat_session.session_id
     is_group_chat = _get_chat_type(chat_session) == "group"
     reply_timing_config = global_config.chat.reply_timing
-    base_value = float(reply_timing_config.talk_value if is_group_chat else reply_timing_config.private_talk_value)
+    if not is_group_chat:
+        value = ChatConfigUtils.get_talk_value(session_id, is_group_chat=False)
+        label = "已暂停" if value == 0 else "正常回复"
+        return {
+            "enabled": False,
+            "base_value": value,
+            "base_value_label": label,
+            "effective_value": value,
+            "effective_value_label": label,
+            "current_time": datetime.now().strftime("%H:%M"),
+            "matched_rules": [],
+        }
+    base_value = float(reply_timing_config.talk_value)
     effective_value = float(ChatConfigUtils.get_talk_value(session_id, is_group_chat=is_group_chat))
     local_time = datetime.now().strftime("%H:%M")
     current_time = datetime.now().time()
@@ -538,6 +558,56 @@ def _get_talk_rule_details(chat_session: ChatSession) -> Dict[str, Any]:
         "current_time": local_time,
         "matched_rules": sorted_rules,
     }
+
+
+def _get_private_reply_details(chat_session: ChatSession) -> Optional[Dict[str, Any]]:
+    """私聊只展示暂停开关和覆盖来源，不读取旧频率。"""
+    if _get_chat_type(chat_session) != "private":
+        return None
+    rule = ChatConfigUtils.find_private_reply_pause_rule(chat_session.session_id)
+    return {
+        "paused": ChatConfigUtils.is_private_reply_paused(chat_session.session_id),
+        "global_paused": global_config.chat.reply_timing.private_reply_paused,
+        "has_override": rule is not None,
+    }
+
+
+def _get_settings_chat_session(session_id: str) -> ChatSession:
+    """在线程池中读取设置目标，始终使用数据库里的真实聊天流。"""
+    normalized_session_id = session_id.strip()
+    if not normalized_session_id:
+        raise HTTPException(status_code=400, detail="缺少聊天流 session_id")
+    with get_db_session() as session:
+        chat_session = session.exec(
+            select(ChatSession).where(col(ChatSession.session_id) == normalized_session_id)
+        ).first()
+    if chat_session is None:
+        raise HTTPException(status_code=404, detail=f"聊天流不存在: {normalized_session_id}")
+    return chat_session
+
+
+def _write_private_reply_pause(chat_session: ChatSession, paused: Optional[bool]) -> None:
+    """更新精确私聊覆盖；删除覆盖后由全局开关决定。"""
+    if _get_chat_type(chat_session) != "private":
+        raise HTTPException(status_code=400, detail="暂停私聊回复只适用于私聊")
+    platform = chat_session.platform
+    item_id = _get_chat_target_id(chat_session)
+    if not platform or not item_id:
+        raise HTTPException(status_code=400, detail="私聊缺少平台或用户 ID")
+    if not BOT_CONFIG_PATH.exists():
+        raise HTTPException(status_code=404, detail="配置文件不存在")
+    with BOT_CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+        config_data = tomlkit.load(config_file)
+    reply_timing = _get_config_table(_get_config_table(config_data, "chat"), "reply_timing")
+    rules = [
+        rule
+        for rule in reply_timing.get("private_reply_pause_rules", [])
+        if not (rule["platform"] == platform and rule["item_id"] == item_id)
+    ]
+    if paused is not None:
+        rules.append({"platform": platform, "item_id": item_id, "paused": paused})
+    reply_timing["private_reply_pause_rules"] = rules
+    save_toml_with_format(config_data, str(BOT_CONFIG_PATH))
 
 
 def _chat_prompt_item_values(chat_prompt_item: Any) -> Optional[Dict[str, Any]]:
@@ -667,6 +737,15 @@ async def _save_chat_talk_frequency_rule(
 ) -> None:
     """写入当前聊天流的精确发言频率规则，并热重载配置。"""
 
+    await asyncio.to_thread(_write_chat_talk_frequency_rule, chat_session, request)
+    if not await config_manager.reload_config(changed_scopes=["bot"], changed_sections=["chat.reply_timing"]):
+        raise HTTPException(status_code=500, detail="配置已写入，但热重载失败")
+
+
+def _write_chat_talk_frequency_rule(chat_session: ChatSession, request: TalkFrequencyUpdateRequest) -> None:
+    """在线程池中保存群聊频率，拒绝继续创建已停用的私聊频率规则。"""
+    if _get_chat_type(chat_session) != "group":
+        raise HTTPException(status_code=400, detail="私聊不再使用回复频率，请使用暂停回复开关")
     config_path = BOT_CONFIG_PATH
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="配置文件不存在")
@@ -725,13 +804,19 @@ async def _save_chat_talk_frequency_rule(
     reply_timing_config["talk_value_rules"] = rules
     save_toml_with_format(config_data, str(config_path))
 
-    if not await config_manager.reload_config(changed_scopes=["bot"], changed_sections=["chat.reply_timing"]):
-        raise HTTPException(status_code=500, detail="配置已写入，但热重载失败")
-
 
 async def _delete_chat_talk_frequency_rule(chat_session: ChatSession, rule_time: Optional[str]) -> None:
     """删除当前聊天流的一条精确发言频率规则，并热重载配置。"""
 
+    await asyncio.to_thread(_remove_chat_talk_frequency_rule, chat_session, rule_time)
+    if not await config_manager.reload_config(changed_scopes=["bot"], changed_sections=["chat.reply_timing"]):
+        raise HTTPException(status_code=500, detail="配置已写入，但热重载失败")
+
+
+def _remove_chat_talk_frequency_rule(chat_session: ChatSession, rule_time: Optional[str]) -> None:
+    """在线程池中删除群聊频率规则。"""
+    if _get_chat_type(chat_session) != "group":
+        raise HTTPException(status_code=400, detail="私聊不再使用回复频率，请使用暂停回复开关")
     config_path = BOT_CONFIG_PATH
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="配置文件不存在")
@@ -767,9 +852,6 @@ async def _delete_chat_talk_frequency_rule(chat_session: ChatSession, rule_time:
 
     reply_timing_config["talk_value_rules"] = next_rules
     save_toml_with_format(config_data, str(config_path))
-
-    if not await config_manager.reload_config(changed_scopes=["bot"], changed_sections=["chat.reply_timing"]):
-        raise HTTPException(status_code=500, detail="配置已写入，但热重载失败")
 
 
 def _get_config_table(config_data: Any, section_name: str) -> Any:
@@ -956,6 +1038,7 @@ def _chat_session_detail_to_response(chat_session: ChatSession) -> Dict[str, Any
             "matched_rule": _target_config_to_dict(JargonConfigUtils._find_jargon_config_item(session_id)),
         },
         "talk_frequency": _get_talk_rule_details(chat_session),
+        "private_reply": _get_private_reply_details(chat_session),
         "prompts": _get_chat_prompt_details(chat_session),
         "adapters": _get_adapter_policy_details(chat_session),
     }
@@ -1223,18 +1306,16 @@ def _delete_chat_session_scope(session_id: str) -> Dict[str, Any]:
 @router.get("/history")
 def get_chat_history(
     limit: int = Query(default=50, ge=1, le=200),
-    user_id: Optional[str] = Query(default=None),
     group_id: Optional[str] = Query(default=None),
 ) -> Dict[str, object]:
     """获取聊天历史记录。
 
-    优先按 ``group_id`` 加载虚拟群聊历史；未提供时使用规范化后的 ``user_id`` 加载 WebUI 私聊历史。
+    优先按 ``group_id`` 加载虚拟群聊历史；未提供时加载内部统一聊天的历史。
     """
     if group_id:
         history = chat_history.get_history(limit, group_id=group_id)
     else:
-        normalized_user_id = normalize_webui_user_id(user_id)
-        history = chat_history.get_history(limit, user_id=normalized_user_id)
+        history = chat_history.get_history(limit, user_id=INTERNAL_CHAT_USER_ID)
     return {"success": True, "messages": history, "total": len(history)}
 
 
@@ -1427,20 +1508,9 @@ async def update_chat_session_talk_frequency(
 ) -> Dict[str, object]:
     """为当前聊天流新增或更新一条精确发言频率规则。"""
 
-    normalized_session_id = str(session_id or "").strip()
-    if not normalized_session_id:
-        raise HTTPException(status_code=400, detail="缺少聊天流 session_id")
-
-    with get_db_session() as session:
-        chat_session = session.exec(
-            select(ChatSession).where(col(ChatSession.session_id) == normalized_session_id)
-        ).first()
-
-    if chat_session is None:
-        raise HTTPException(status_code=404, detail=f"聊天流不存在: {normalized_session_id}")
-
+    chat_session = await asyncio.to_thread(_get_settings_chat_session, session_id)
     await _save_chat_talk_frequency_rule(chat_session, request)
-    return {"success": True, "detail": _chat_session_detail_to_response(chat_session)}
+    return {"success": True, "detail": await asyncio.to_thread(_chat_session_detail_to_response, chat_session)}
 
 
 @router.delete("/sessions/{session_id}/talk-frequency")
@@ -1450,20 +1520,22 @@ async def delete_chat_session_talk_frequency(
 ) -> Dict[str, object]:
     """删除当前聊天流的一条精确发言频率规则。"""
 
-    normalized_session_id = str(session_id or "").strip()
-    if not normalized_session_id:
-        raise HTTPException(status_code=400, detail="缺少聊天流 session_id")
-
-    with get_db_session() as session:
-        chat_session = session.exec(
-            select(ChatSession).where(col(ChatSession.session_id) == normalized_session_id)
-        ).first()
-
-    if chat_session is None:
-        raise HTTPException(status_code=404, detail=f"聊天流不存在: {normalized_session_id}")
-
+    chat_session = await asyncio.to_thread(_get_settings_chat_session, session_id)
     await _delete_chat_talk_frequency_rule(chat_session, time)
-    return {"success": True, "detail": _chat_session_detail_to_response(chat_session)}
+    return {"success": True, "detail": await asyncio.to_thread(_chat_session_detail_to_response, chat_session)}
+
+
+@router.put("/sessions/{session_id}/private-reply-pause")
+async def update_private_reply_pause(
+    session_id: str,
+    request: PrivateReplyPauseUpdateRequest,
+) -> Dict[str, object]:
+    """切换当前私聊的暂停回复开关，或恢复跟随全局。"""
+    chat_session = await asyncio.to_thread(_get_settings_chat_session, session_id)
+    await asyncio.to_thread(_write_private_reply_pause, chat_session, request.paused)
+    if not await config_manager.reload_config(changed_scopes=["bot"], changed_sections=["chat.reply_timing"]):
+        raise HTTPException(status_code=500, detail="配置已写入，但热重载失败")
+    return {"success": True, "detail": await asyncio.to_thread(_chat_session_detail_to_response, chat_session)}
 
 
 @router.put("/sessions/{session_id}/learning/{kind}")
@@ -1689,19 +1761,18 @@ async def delete_chat_session_prompt(session_id: str, index: int) -> Dict[str, o
 
 
 @router.delete("/history")
-def clear_chat_history(
-    user_id: Optional[str] = Query(default=None),
+async def clear_chat_history(
     group_id: Optional[str] = Query(default=None),
 ) -> Dict[str, object]:
     """清空聊天历史记录。
 
-    优先按 ``group_id`` 清理虚拟群聊历史；未提供时使用规范化后的 ``user_id`` 清理 WebUI 私聊历史。
+    优先按 ``group_id`` 清理虚拟群聊历史；未提供时清理内部统一聊天的历史。
     """
-    if group_id:
-        deleted = chat_history.clear_history(group_id=group_id)
-    else:
-        normalized_user_id = normalize_webui_user_id(user_id)
-        deleted = chat_history.clear_history(user_id=normalized_user_id)
+    target = {"group_id": group_id} if group_id else {"user_id": INTERNAL_CHAT_USER_ID}
+    session_ids = await asyncio.to_thread(chat_history._resolve_session_ids, **target)
+    for session_id in session_ids:
+        await run_on_main_loop(heartflow_manager.clear_chat_history_context(session_id))
+    deleted = await asyncio.to_thread(chat_history.clear_history, **target)
     return {"success": True, "message": f"已清空 {deleted} 条聊天记录"}
 
 
@@ -1710,6 +1781,6 @@ def get_chat_info() -> Dict[str, object]:
     """获取聊天室信息。"""
     return {
         "bot_name": global_config.bot.nickname,
-        "platform": WEBUI_CHAT_PLATFORM,
+        "platform": INTERNAL_CHAT_PLATFORM,
         "active_sessions": len(chat_manager.active_connections),
     }

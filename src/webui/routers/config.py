@@ -34,7 +34,6 @@ from src.config.official_configs import (
     BotConfig,
     ChatConfig,
     ChineseTypoConfig,
-    DatabaseConfig,
     DebugConfig,
     EmojiConfig,
     ExpressionConfig,
@@ -86,6 +85,15 @@ async def _reload_model_config_after_save() -> None:
     raise HTTPException(status_code=500, detail="模型配置已保存，但运行时热重载失败，请检查日志")
 
 
+class PromptValidationResult(BaseModel):
+    """Prompt 参数校验结果。"""
+
+    valid: bool = True
+    missing_placeholders: List[str] = Field(default_factory=list)
+    extra_placeholders: List[str] = Field(default_factory=list)
+    message: str = ""
+
+
 class PromptFileInfo(BaseModel):
     """Prompt 文件信息。"""
 
@@ -97,15 +105,7 @@ class PromptFileInfo(BaseModel):
     description: str = Field(default="", description="Prompt 描述")
     customized: bool = Field(default=False, description="是否存在用户自定义覆盖")
     custom_version_count: int = Field(default=0, description="用户自定义版本数量")
-
-
-class PromptValidationResult(BaseModel):
-    """Prompt 参数校验结果。"""
-
-    valid: bool = True
-    missing_placeholders: List[str] = Field(default_factory=list)
-    extra_placeholders: List[str] = Field(default_factory=list)
-    message: str = ""
+    validation: PromptValidationResult = Field(default_factory=PromptValidationResult)
 
 
 class PromptVersionInfo(BaseModel):
@@ -919,6 +919,12 @@ def list_prompt_files():
                 template_info = prompt_template_infos.get(prompt_file.stem)
                 metadata = template_info.metadata if template_info and template_info.path == prompt_file else None
                 versions = _list_prompt_versions(language, prompt_file.name)
+                default_content = prompt_file.read_text(encoding="utf-8")
+                effective_content = (
+                    custom_prompt_file.read_text(encoding="utf-8")
+                    if custom_prompt_file.exists()
+                    else default_content
+                )
                 prompt_files.append(
                     PromptFileInfo(
                         name=prompt_file.name,
@@ -929,6 +935,7 @@ def list_prompt_files():
                         description=metadata.description if metadata else "",
                         customized=custom_prompt_file.exists(),
                         custom_version_count=len(versions),
+                        validation=_build_prompt_validation(default_content, effective_content),
                     )
                 )
 
@@ -956,9 +963,7 @@ def get_prompt_file(language: str, filename: str):
         effective_prompt_path = custom_prompt_path if custom_prompt_path.exists() else prompt_path
         content = effective_prompt_path.read_text(encoding="utf-8")
         default_content = prompt_path.read_text(encoding="utf-8")
-        validation = (
-            _build_prompt_validation(default_content, content) if custom_prompt_path.exists() else PromptValidationResult()
-        )
+        validation = _build_prompt_validation(default_content, content)
         return PromptFileResponse(
             language=language,
             filename=filename,
@@ -990,6 +995,7 @@ def get_default_prompt_file(language: str, filename: str):
             filename=filename,
             content=content,
             customized=False,
+            validation=_build_prompt_validation(content, content),
             active_version_id=_get_active_prompt_version_id(language, filename),
             versions=_list_prompt_versions(language, filename),
         )
@@ -1232,12 +1238,26 @@ def get_maisaka_prompt_preview(path: str = Query(..., description="logs/maisaka_
     return FileResponse(preview_path, media_type=media_type)
 
 
+def _apply_retro_prompt_schema_lock(schema: Dict[str, Any]) -> None:
+    """按当前模型状态锁定复古开关，不污染缓存的基础 schema。"""
+    for field in schema["fields"]:
+        if field["name"] == "replyer_retro_prompt":
+            field["readOnly"] = config_manager.retro_prompt_forced
+
+
+def _validate_retro_prompt_setting(config_data: Dict[str, Any]) -> None:
+    """模型要求复古模板时，所有主配置写入入口均禁止手动关闭。"""
+    if config_manager.retro_prompt_forced and config_data.get("debug", {}).get("replyer_retro_prompt") is False:
+        raise HTTPException(status_code=400, detail="当前 replyer 模型需要复古回复提示词，解除对应模型的 replyer 分配后才能关闭")
+
+
 @router.get("/schema/bot")
 def get_bot_config_schema():
     """获取麦麦主程序配置架构"""
     try:
         # Config 类包含所有子配置
-        schema = _get_cached_schema("bot", Config)
+        schema = copy.deepcopy(_get_cached_schema("bot", Config))
+        _apply_retro_prompt_schema_lock(schema["nested"]["debug"])
         return {"success": True, "schema": schema}
     except Exception as e:
         logger.error(f"获取配置架构失败: {e}")
@@ -1292,7 +1312,6 @@ def get_config_section_schema(section_name: str):
     - log: LogConfig
     - maim_message: MaimMessageConfig
     - webui: WebUIConfig
-    - database: DatabaseConfig
     - mcp: MCPConfig
     - plugin: PluginConfig
     - plugin_runtime: PluginRuntimeConfig
@@ -1320,7 +1339,6 @@ def get_config_section_schema(section_name: str):
         "log": LogConfig,
         "maim_message": MaimMessageConfig,
         "webui": WebUIConfig,
-        "database": DatabaseConfig,
         "mcp": MCPConfig,
         "plugin": PluginConfig,
         "plugin_runtime": PluginRuntimeConfig,
@@ -1337,7 +1355,9 @@ def get_config_section_schema(section_name: str):
 
     try:
         config_class = section_map[section_name]
-        schema = _get_cached_schema(f"section:{section_name}", config_class, include_nested=False)
+        schema = copy.deepcopy(_get_cached_schema(f"section:{section_name}", config_class, include_nested=False))
+        if section_name == "debug":
+            _apply_retro_prompt_schema_lock(schema)
         return {"success": True, "schema": schema}
     except Exception as e:
         logger.error(f"获取配置节架构失败: {e}")
@@ -1504,6 +1524,7 @@ async def activate_model_config_version(version_id: str, request: ModelConfigVer
 def update_bot_config(config_data: ConfigBody):
     """更新麦麦主程序配置"""
     try:
+        _validate_retro_prompt_setting(config_data)
         config_data = _coerce_config_numeric_values(config_data, Config)
 
         # 验证配置数据
@@ -1558,6 +1579,8 @@ async def update_model_config(config_data: ConfigBody):
 def update_bot_config_section(section_name: str, section_data: SectionBody):
     """更新麦麦主程序配置的指定节（保留注释和格式）"""
     try:
+        if section_name == "debug" and isinstance(section_data, dict):
+            _validate_retro_prompt_setting({"debug": section_data})
         # 读取现有配置
         config_path = os.path.join(CONFIG_DIR, "bot_config.toml")
         if not os.path.exists(config_path):
@@ -1636,6 +1659,7 @@ def update_bot_config_raw(raw_content: RawContentBody):
             raise HTTPException(status_code=400, detail=f"TOML 格式错误: {str(e)}") from e
 
         # 验证配置数据结构
+        _validate_retro_prompt_setting(config_data)
         try:
             Config.from_dict(AttributeData(), _toml_to_plain_dict(config_data))
         except Exception as e:

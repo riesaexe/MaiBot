@@ -278,11 +278,6 @@ class ModelInfo(ConfigBase):
     )
     """输入价格 (用于API调用统计, 单位：元/ M token) (可选, 若无该字段, 默认值为0)"""
 
-    cache: bool = Field(
-        default=False,
-    )
-    """遗留兼容字段，不参与任何逻辑：是否按缓存价计费由 cache_price_in 决定，统计页是否展示缓存用量由服务商是否在响应中返回缓存字段自动探测。"""
-
     cache_price_in: float = Field(
         default=0.0,
         ge=0,
@@ -475,15 +470,6 @@ class ModelTaskConfig(ConfigBase):
         },
     )
     """记忆模型配置，用于长期记忆总结、抽取、写回等高记忆任务；留空时由调用方按需回退"""
-
-    mid_memory: TaskConfig = Field(
-        default_factory=TaskConfig,
-        json_schema_extra={
-            "x-widget": "custom",
-            "advanced": True,
-        },
-    )
-    """聊天回想模型配置；留空时自动继用 fast_model 模型，fast_model 留空时使用 utils 模型"""
 
     utils: TaskConfig = Field(
         default_factory=TaskConfig,

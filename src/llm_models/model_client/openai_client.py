@@ -11,7 +11,7 @@ import json
 import re
 
 from json_repair import repair_json
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI, AsyncStream
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, AsyncStream, DefaultAsyncHttpxClient
 from openai._types import FileTypes, Omit, omit
 from openai.types.chat import (
     ChatCompletion,
@@ -32,6 +32,7 @@ from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from PIL import Image as PILImage
 
 from src.common.logger import get_logger
+from src.common.http_client import get_shared_ssl_context
 from src.config.model_configs import APIProvider, ReasoningParseMode, ToolArgumentParseMode
 from src.llm_models.exceptions import (
     EmptyResponseException,
@@ -652,7 +653,7 @@ def _extract_usage_record(usage: Any) -> UsageTuple | None:
     )
     prompt_cache_hit_tokens = reported_hit_tokens or reported_cached_tokens or 0
     prompt_cache_miss_tokens = reported_miss_tokens or 0
-    if prompt_cache_miss_tokens == 0 and prompt_cache_hit_tokens > 0:
+    if reported_miss_tokens is None and prompt_cache_reported:
         prompt_cache_miss_tokens = max(prompt_tokens - prompt_cache_hit_tokens, 0)
     return (
         prompt_tokens,
@@ -1452,6 +1453,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
         # 此时若没有自定义 Authorization 头覆盖占位密钥，每次请求都要显式省略它
         self._omit_sdk_authorization = not client_config.api_key and _AUTHORIZATION_HEADER not in default_headers
         self.client = AsyncOpenAI(
+            http_client=DefaultAsyncHttpxClient(verify=get_shared_ssl_context()),
             api_key=client_config.api_key or _SDK_AUTH_PLACEHOLDER_API_KEY,
             organization=api_provider.organization,
             project=api_provider.project,
@@ -1598,6 +1600,8 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
                 """
                 # 每次用副本，避免重试两次之间相互污染 extra_body
                 extra_body = dict(request_overrides.extra_body)
+                if request.tool_choice is not None:
+                    extra_body["tool_choice"] = request.tool_choice
                 if use_max_completion_tokens:
                     # 清除经由 extra_params.body 嵌套传入、未被 reserved_body_keys 过滤的
                     # 遗留 max_tokens，否则重试仍会同时发送 max_tokens 导致再次 400。

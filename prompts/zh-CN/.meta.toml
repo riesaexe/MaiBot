@@ -1,7 +1,22 @@
+[text_learning_expression]
+display_name = "长文学习表达"
+advanced = true
+description = "从用户粘贴的文段中提取有原文依据的表达候选，供用户选择导入。"
+
+[text_learning_jargon]
+display_name = "长文学习黑话"
+advanced = true
+description = "从用户粘贴的文段中提取黑话与含义，供用户选择导入。"
+
 [a_memorix_chat_summary]
 display_name = "长期记忆聊天总结"
 advanced = false
 description = "从当前聊天窗口提取可写入长期记忆的增量信息与重要知识。"
+
+[maisaka_chat_passive]
+display_name = "规划器（被动式 replyer）"
+advanced = true
+description = "开启实验性被动式 replyer 时使用；Planner 最终正文作为回复指导，工具调用仍用于操作。"
 
 [maisaka_chat]
 display_name = "规划器"
@@ -121,7 +136,7 @@ description = "用于从真实聊天内容中抽取群内黑话候选，并交�
 [maisaka_chat_focus]
 display_name = "Focus 规划器"
 advanced = true
-description = "Focus 模式下的 Maisaka 规划模板，负责基于当前关注聊天和跨聊天概览选择下一步行动。"
+description = "Focus 共享规划器，结合组内全部聊天，通过工具的 session_id 指定处理目标。"
 
 [maisaka_chat_optimized]
 display_name = "规划器（优化版）"
@@ -133,10 +148,15 @@ display_name = "长期记忆模糊修改"
 advanced = true
 description = "用于根据用户的自然语言修改描述和候选记忆，规划失效旧记忆与写入新记忆的操作。"
 
-[mid_term_memory_summary]
-display_name = "中期聊天摘要"
+[context_compaction]
+display_name = "普通聊天滚动状态摘要"
 advanced = true
-description = "用于在上下文裁切时，将被移出的聊天记录概括成 long_summary、brief 和 keywords。"
+description = "复用普通聊天 Planner 请求，将历史与旧摘要整理为话题、背景、进展、未完事项和对话约定。"
+
+[context_compaction_focus]
+display_name = "Focus 滚动状态摘要"
+advanced = true
+description = "复用 Focus Planner 请求，为共享组生成五类滚动摘要，并保留各聊天的来源归属。"
 
 [webui_ai_search]
 display_name = "WebUI AI 搜索"
@@ -157,3 +177,43 @@ description = "用于在 AI 搜索回答未通过证据校验时，要求模型�
 display_name = "WebUI AI 搜索证据消息"
 advanced = true
 description = "用于把 AI 搜索中只读工具的返回结果包装成无工具请求可用的证据消息。"
+
+[a_memorix_fact_deduplication]
+display_name = "长期记忆事实去重"
+advanced = true
+description = "判断新事实与已有记忆是否重复，保留独立事件、状态变化和矛盾信息。"
+
+[agent_acp]
+display_name = "外接 Agent 接入说明"
+advanced = true
+description = "外接 Agent 接入说明。"
+
+[agent_acp_computer]
+display_name = "外接 Agent 电脑使用"
+advanced = true
+description = "外接 Agent 电脑使用。"
+
+[agent_acp_environment]
+display_name = "外接 Agent 环境说明"
+advanced = true
+description = "外接 Agent 环境说明。"
+
+[agent_acp_failure]
+display_name = "外接 Agent 失败回报"
+advanced = true
+description = "外接 Agent 失败回报。"
+
+[agent_planner]
+display_name = "外接 Planner 接入说明"
+advanced = true
+description = "外接 Planner 接入说明。"
+
+[agent_planner_resume]
+display_name = "外接 Planner 中断恢复"
+advanced = true
+description = "外接 Planner 中断恢复。"
+
+[agent_planner_continue]
+display_name = "外接 Planner 继续执行"
+advanced = true
+description = "外接 Planner 继续执行。"

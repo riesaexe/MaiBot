@@ -46,24 +46,22 @@ def test_expression_defaults_reset_once_and_remove_old_mode():
     assert result.data["expression"] == {
         "expression_checked_only": False,
         "expression_self_reflect": True,
-        "use_vector_expression": True,
+        "use_vector_expression": False,
     }
 
     # 跨版本只重置一次，用户随后设置的开关不能在同版本加载时被覆盖。
     result.data["expression"]["expression_checked_only"] = True
-    result.data["expression"]["use_vector_expression"] = False
+    result.data["expression"]["use_vector_expression"] = True
     reloaded = apply_config_upgrade_hooks(result.data, "bot_config.toml", "8.14.58", "8.14.58")
     assert reloaded.migrated is False
     assert reloaded.data["expression"]["expression_checked_only"] is True
-    assert reloaded.data["expression"]["use_vector_expression"] is False
+    assert reloaded.data["expression"]["use_vector_expression"] is True
 
 
 def test_split_chat_config_sections_upgrade_hook():
     config_data = {
         "chat": {
             "talk_value": 0.4,
-            "private_talk_value": 0.8,
-            "reply_trigger_mode": "frequency",
             "enable_talk_value_rules": True,
             "talk_value_rules": [
                 {
@@ -93,8 +91,6 @@ def test_split_chat_config_sections_upgrade_hook():
     assert result.migrated is True
     assert chat_config["max_context_size"] == 40
     assert chat_config["reply_timing"]["talk_value"] == 0.4
-    assert chat_config["reply_timing"]["private_talk_value"] == 0.8
-    assert chat_config["reply_timing"]["reply_trigger_mode"] == "frequency"
     assert chat_config["reply_timing"]["enable_talk_value_rules"] is True
     assert chat_config["reply_timing"]["talk_value_rules"][0]["value"] == 0.5
     assert chat_config["reply_style"]["enable_reply_quote"] is False
@@ -197,35 +193,6 @@ def test_behavior_style_upgrade_does_not_create_missing_personality_section():
     assert "personality" not in result.data
 
 
-def test_removed_reply_necessity_trigger_mode_upgrade_hook():
-    config_data = {"chat": {"reply_timing": {"reply_trigger_mode": "reply_necessity"}}}
-
-    result = apply_config_upgrade_hooks(
-        config_data,
-        config_name="bot_config.toml",
-        old_ver="8.14.53",
-        new_ver="8.14.54",
-    )
-
-    assert result.migrated is True
-    assert result.data["chat"]["reply_timing"]["reply_trigger_mode"] == "dynamic"
-    assert result.reason == "8.14.54:chat.reply_timing.reply_trigger_mode"
-
-
-def test_removed_reply_necessity_trigger_mode_hook_preserves_frequency_mode():
-    config_data = {"chat": {"reply_timing": {"reply_trigger_mode": "frequency"}}}
-
-    result = apply_config_upgrade_hooks(
-        config_data,
-        config_name="bot_config.toml",
-        old_ver="8.14.53",
-        new_ver="8.14.54",
-    )
-
-    assert result.migrated is False
-    assert result.data["chat"]["reply_timing"]["reply_trigger_mode"] == "frequency"
-
-
 def _learning_rule(platform: str, item_id: str, rule_type: str, use: bool) -> dict:
     return {"platform": platform, "item_id": item_id, "type": rule_type, "use": use, "learn": True}
 
@@ -292,3 +259,19 @@ def test_learning_rule_merge_hook_drops_dead_defaults_and_skips_clean_config():
     result = apply_config_upgrade_hooks(clean_config, "bot_config.toml", "8.14.59", "8.14.60")
     assert result.reason == "8.14.60:jargon.learning_list"
     assert result.data["jargon"]["learning_list"] == [_learning_rule("qq", "", "group", True)]
+
+
+def test_planner_message_steering_moves_to_reply_timing():
+    config_data = {"experimental": {"planner_message_steering": True}, "chat": {"reply_timing": {}}}
+
+    result = apply_config_upgrade_hooks(
+        config_data,
+        config_name="bot_config.toml",
+        old_ver="8.15.36",
+        new_ver="8.15.37",
+    )
+
+    assert result.migrated is True
+    assert "planner_message_steering" not in result.data["experimental"]
+    assert result.data["chat"]["reply_timing"]["planner_message_steering"] is True
+    assert result.reason == "8.15.37:chat.reply_timing.planner_message_steering"

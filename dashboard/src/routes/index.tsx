@@ -27,6 +27,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
 import { MobilePageHeader } from '@/components/layout/MobilePageHeader'
+import type { NewsItem } from '@/lib/news-api'
 import { RestartProvider, useRestart } from '@/lib/restart-context'
 import { ThemeProviderContext } from '@/lib/theme-context'
 import { openUpdateNotice } from '@/lib/update-notice-events'
@@ -40,7 +41,10 @@ import { useLocalCacheMetrics } from './home/hooks/useLocalCacheMetrics'
 import { useMaibotVersion } from './home/hooks/useMaibotVersion'
 import { HitokotoEditorDialog } from './home/HitokotoEditorDialog'
 import { HomeCardManager, type HomeCardDefinition } from './home/HomeCardManager'
-import { NewsCard } from './home/NewsCard'
+import { NewsCard, NewsDialog } from './home/NewsCard'
+import { useNews } from './home/hooks/useNews'
+import { useNewsReadState } from './home/hooks/useNewsReadState'
+import { NewsStrip } from './home/NewsStrip'
 import { usePluginHomeCards } from './home/hooks/usePluginHomeCards'
 import { useQuickShortcuts } from './home/hooks/useQuickShortcuts'
 import { useReviewStats } from './home/hooks/useReviewStats'
@@ -377,12 +381,18 @@ const IndexPageContent = memo(function IndexPageContent({ botVersion }: { botVer
     hitokoto,
     hitokotoLoading,
     hitokotoSettings,
-    selfUpdateStatus,
     versionCompatibility,
     fetchHitokoto,
     saveHitokotoSettings,
   } = useMaibotVersion()
   const { pluginHomeCards } = usePluginHomeCards()
+  const newsState = useNews()
+  const newsReadState = useNewsReadState()
+  const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null)
+  const openNews = (item: NewsItem) => {
+    newsReadState.markRead(item)
+    setSelectedNews(item)
+  }
 
   const [isReviewerOpen, setIsReviewerOpen] = useState(false)
   const [hitokotoEditorOpen, setHitokotoEditorOpen] = useState(false)
@@ -652,7 +662,7 @@ const IndexPageContent = memo(function IndexPageContent({ botVersion }: { botVer
       preferredHeight: 'low',
       category: 'status',
       source: 'builtin',
-      render: () => <NewsCard />,
+      render: () => <NewsCard newsState={newsState} readState={newsReadState} onOpen={openNews} />,
     },
     {
       id: 'builtin:prompt-cache',
@@ -923,7 +933,6 @@ const IndexPageContent = memo(function IndexPageContent({ botVersion }: { botVer
     ...homeCards.filter((card) => card.id === hitokotoCardId),
     ...homeCards.filter((card) => !firstRowCardIds.includes(card.id) && card.id !== hitokotoCardId),
   ]
-  const maibotUpdateAvailable = Boolean(selfUpdateStatus?.update_available)
   const versionsMismatch =
     versionCompatibility?.status !== undefined && versionCompatibility.status !== 'compatible'
   // 移动端由 Layout 的 main 滚动，内层按内容撑高并允许滚动传递，避免拦截触摸滑动。
@@ -1002,22 +1011,8 @@ const IndexPageContent = memo(function IndexPageContent({ botVersion }: { botVer
             </span>
             <span className="text-base">V{APP_VERSION}</span>
           </button>
-          {maibotUpdateAvailable && selfUpdateStatus && (
-            <a
-              href={selfUpdateStatus.deployment_type === 'package'
-                ? 'https://pypi.org/project/maibot/'
-                : `https://github.com/Mai-with-u/MaiBot/compare/${selfUpdateStatus.current_commit}...${selfUpdateStatus.latest_commit}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-sm text-sky-600 hover:underline dark:text-sky-400"
-            >
-              {t('home.versionCard.updateAvailable')} {selfUpdateStatus.deployment_type === 'package'
-                ? `V${selfUpdateStatus.latest_version}`
-                : `${selfUpdateStatus.branch} · ${selfUpdateStatus.latest_commit?.slice(0, 8)}`}
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          )}
           {versionsMismatch && <span className="text-sm">{t('home.versionCard.mismatch')}</span>}
+          <NewsStrip news={newsState.news} readState={newsReadState} onOpen={openNews} />
           <span
             aria-hidden="true"
             data-home-version-stripes="true"
@@ -1034,6 +1029,8 @@ const IndexPageContent = memo(function IndexPageContent({ botVersion }: { botVer
             </svg>
           </span>
         </div>
+
+        <NewsDialog selectedNews={selectedNews} onClose={() => setSelectedNews(null)} />
 
         <HomeCardManager
           cards={orderedHomeCards}

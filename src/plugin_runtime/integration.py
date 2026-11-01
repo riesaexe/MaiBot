@@ -54,6 +54,8 @@ from src.plugin_runtime.host.hook_dispatcher import HookDispatchResult, HookDisp
 from src.plugin_runtime.host.hook_spec_registry import HookSpec, HookSpecRegistry
 from src.plugin_runtime.protocol.envelope import InspectPluginConfigResultPayload
 from src.plugin_runtime.runner.manifest_validator import ManifestValidator, is_reserved_plugin_directory
+from src.plugin_runtime.runner.plugin_enabled import is_plugin_disabled
+from src.plugin_runtime.usage_tracker import PluginUsageTracker
 
 if TYPE_CHECKING:
     from src.chat.message_receive.message import SessionMessage
@@ -147,6 +149,10 @@ class PluginRuntimeManager(
         self._pending_plugin_source_change = False
         self._plugin_change_task: Optional[asyncio.Task[None]] = None
         self._applied_plugin_configs: Dict[str, Dict[str, Any]] = {}
+        self._plugin_usage_tracker: Optional[PluginUsageTracker] = None
+        self._plugin_usage_task: Optional[asyncio.Task[None]] = None
+        self._plugin_usage_tracking = False
+        self._plugin_usage_error: Optional[str] = None
 
     async def run_plugin_file_update(self, operation: Callable[[], Awaitable[None]]) -> None:
         """在主循环串行执行文件替换及运行时恢复，避免源码监听中途重启 Supervisor。"""
@@ -159,8 +165,69 @@ class PluginRuntimeManager(
         return lambda: self._status_listeners.discard(callback)
 
     def _notify_status_changed(self) -> None:
+        self._reconcile_plugin_usage()
         for callback in tuple(self._status_listeners):
             callback()
+
+    def _reconcile_plugin_usage(self) -> None:
+        tracker = self._plugin_usage_tracker
+        if tracker is None:
+            return
+        active: Set[str] = set()
+        if self._plugin_usage_tracking:
+            for supervisor in self.supervisors:
+                active.update(supervisor.get_usage_active_plugin_ids())
+            active.difference_update(self._blocked_plugin_reasons, self._offline_adapter_plugin_ids)
+        tracker.reconcile(active)
+
+    def get_plugin_usage_seconds(self) -> Dict[str, float]:
+        """主循环中的纯内存读取；不通过浏览器访问或墙上时间推进计时。"""
+        if self._plugin_usage_error is not None:
+            raise RuntimeError(f"插件使用时长计时不可用: {self._plugin_usage_error}")
+        self._reconcile_plugin_usage()
+        return self._plugin_usage_tracker.snapshot() if self._plugin_usage_tracker is not None else {}
+
+    async def _start_plugin_usage_tracking(self) -> None:
+        tracker = PluginUsageTracker(get_instance_root() / "data" / "plugin_runtime" / "plugin_usage.json")
+        self._plugin_usage_tracker = None
+        self._plugin_usage_tracking = False
+        self._plugin_usage_error = None
+        try:
+            await tracker.load()
+        except Exception as exc:
+            self._plugin_usage_error = str(exc)
+            raise
+        self._plugin_usage_tracker = tracker
+        self._plugin_usage_tracking = True
+        self._reconcile_plugin_usage()
+        self._plugin_usage_task = asyncio.create_task(self._checkpoint_plugin_usage(), name="PluginRuntime.usage")
+
+    async def _checkpoint_plugin_usage(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            self._reconcile_plugin_usage()
+            if self._plugin_usage_tracker is not None:
+                try:
+                    await self._plugin_usage_tracker.save()
+                except Exception:
+                    logger.exception("保存插件累计使用时长失败")
+
+    async def _stop_plugin_usage_tracking(self) -> None:
+        self._plugin_usage_tracking = False
+        self._reconcile_plugin_usage()
+        task = self._plugin_usage_task
+        self._plugin_usage_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if self._plugin_usage_tracker is not None:
+            try:
+                await self._plugin_usage_tracker.save()
+            except Exception:
+                logger.exception("停止插件运行时保存累计使用时长失败")
 
     async def get_plugin_state_snapshot(self) -> Dict[str, Any]:
         """在主循环读取一致的运行状态，目录扫描在线程池执行。"""
@@ -184,7 +251,8 @@ class PluginRuntimeManager(
         statuses.update(self._plugin_transitions)
         reasons = self.get_plugin_load_failure_reasons()
         return {"statuses": statuses, "failure_reasons": reasons,
-                "circuit_statuses": self.get_plugin_circuit_statuses(), "running": self._started}
+                "circuit_statuses": self.get_plugin_circuit_statuses(), "running": self._started,
+                "usage_seconds": self.get_plugin_usage_seconds()}
 
     async def apply_plugin_config(
         self, plugin_id: str, write_config: Optional[Callable[[], Awaitable[None]]] = None,
@@ -200,6 +268,24 @@ class PluginRuntimeManager(
                 supervisor = await asyncio.to_thread(self._find_supervisor_by_plugin_directory, plugin_id)
             if supervisor is None:
                 raise RuntimeError(f"插件 {plugin_id} 没有对应的运行时")
+
+            if plugin_id not in supervisor.get_loaded_plugin_ids():
+                plugin_path = await asyncio.to_thread(self._get_plugin_path_for_supervisor, supervisor, plugin_id)
+                if plugin_path is not None:
+                    if await asyncio.to_thread(is_plugin_disabled, plugin_path):
+                        return "inactive"
+                    # 配置解析会冷导入插件，启用时必须先补齐依赖，避免在检查配置之前就因缺包失败。
+                    dependency_state = await self._sync_plugin_dependencies(list(self._iter_plugin_dirs()))
+                    if blocked_reason := self._blocked_plugin_reasons.get(plugin_id):
+                        raise RuntimeError(blocked_reason)
+                    if dependency_state.environment_changed or dependency_state.blocked_changed_plugin_ids:
+                        if not await self._restart_supervisors(reason="config_enabled_dependencies"):
+                            raise RuntimeError("启用插件时同步依赖后重启运行时失败")
+                        supervisor = self._get_supervisor_for_plugin(plugin_id)
+                        if supervisor is None:
+                            supervisor = await asyncio.to_thread(self._find_supervisor_by_plugin_directory, plugin_id)
+                        if supervisor is None:
+                            raise RuntimeError(f"插件 {plugin_id} 没有对应的运行时")
             snapshot = await supervisor.inspect_plugin_config(plugin_id)
             loaded = plugin_id in supervisor.get_loaded_plugin_ids()
             if snapshot.config_error:
@@ -289,6 +375,22 @@ class PluginRuntimeManager(
             raise ValueError("Platform IO 入站封装缺少可用的 SessionMessage 或 payload")
         session_message.received_at = received_at
 
+        # 文件来源由已登记的入站驱动签注，不接受消息负载伪造的适配器身份。
+        from src.platform_io import get_platform_io_manager
+        from src.common.data_models.message_component_data_model import FileComponent
+
+        descriptor = get_platform_io_manager().driver_registry.get(envelope.driver_id).descriptor
+        group = session_message.message_info.group_info
+        session_message.file_source = {
+            "driver_id": envelope.driver_id, "plugin_id": descriptor.plugin_id or "",
+            "account_id": descriptor.account_id or "", "scope": descriptor.scope or "",
+            "platform": descriptor.platform,
+            "group_id": group.group_id if group else "",
+            "user_id": session_message.message_info.user_info.user_id,
+            "files": {(component.file_id, component.busid) for component in session_message.raw_message.components
+                      if isinstance(component, FileComponent)},
+        }
+
         from src.chat.message_receive.bot import chat_bot
 
         await chat_bot.receive_message(session_message)
@@ -316,7 +418,7 @@ class PluginRuntimeManager(
             log_compat_warnings=False,
             force_plugin_compatibility=is_force_plugin_compatibility_enabled(),
         )
-        return validator.build_plugin_dependency_map(plugin_dirs)
+        return validator.build_plugin_dependency_map(plugin_dirs, enabled_only=True)
 
     @classmethod
     def _discover_llm_provider_conflicts(
@@ -341,7 +443,9 @@ class PluginRuntimeManager(
         )
         excluded_ids = excluded_plugin_ids or set()
         provider_owners: Dict[str, List[str]] = {}
-        for _plugin_path, manifest in validator.iter_plugin_manifests(plugin_dirs, require_entrypoint=True):
+        for _plugin_path, manifest in validator.iter_plugin_manifests(
+            plugin_dirs, require_entrypoint=True, enabled_only=True
+        ):
             if manifest.id in excluded_ids:
                 continue
             for client_type in manifest.llm_provider_client_types:
@@ -539,6 +643,12 @@ class PluginRuntimeManager(
             )
             logger.error(f"检测到重复插件 ID，冲突插件将被隔离，其余插件继续加载: {details}")
 
+        # 桌宠已经内置；保留旧插件源码和数据，但不能再启动第二个窗口。
+        known_plugins = await asyncio.to_thread(self._discover_plugin_dependency_map, plugin_dirs)
+        if "sengokucola.desktop-pet" in known_plugins:
+            duplicate_plugin_reasons["sengokucola.desktop-pet"] = (
+                "桌宠已合并到主程序，请在主程序配置中启用 desktop_pet.enabled；旧待办和窗口位置继续沿用。"
+            )
         result = await self._plugin_dependency_pipeline.execute(
             plugin_dirs,
             initial_blocked_plugin_reasons=duplicate_plugin_reasons,
@@ -803,6 +913,7 @@ class PluginRuntimeManager(
 
         started_supervisors: List["PluginSupervisor"] = []
         try:
+            await self._start_plugin_usage_tracking()
             platform_io_manager.set_inbound_dispatcher(self._dispatch_platform_inbound)
             with diagnostic_stage("plugin_runtime.prepare_send_pipeline"):
                 await platform_io_manager.ensure_send_pipeline_ready()
@@ -823,7 +934,11 @@ class PluginRuntimeManager(
             logger.info(
                 f"已启动 {len(started_supervisors)} 个独立插件运行时：{'；'.join(runtime_descriptions)}"
             )
+        except asyncio.CancelledError:
+            await self._stop_plugin_usage_tracking()
+            raise
         except Exception as e:
+            await self._stop_plugin_usage_tracking()
             logger.error(f"插件运行时启动失败: {e}", exc_info=True)
             await self._stop_plugin_file_watcher()
             if self._config_reload_callback_registered:
@@ -846,6 +961,8 @@ class PluginRuntimeManager(
         if not self._started:
             return
 
+        # 进入关停即结算；后续 watcher / 插件清理异常也不会遗留周期保存任务。
+        await self._stop_plugin_usage_tracking()
         platform_io_manager = get_platform_io_manager()
         await self._stop_plugin_file_watcher()
         if self._config_reload_callback_registered:
@@ -1200,7 +1317,7 @@ class PluginRuntimeManager(
         }
 
     async def take_adapters_offline(self) -> AdapterRuntimeTransitionResult:
-        """卸载当前所有适配器插件，并记录可恢复的插件集合。"""
+        """卸载当前所有适配器插件，停止失去发送链路的聊天流并记录可恢复的插件集合。"""
 
         if not self._started:
             return AdapterRuntimeTransitionResult(
@@ -1230,6 +1347,12 @@ class PluginRuntimeManager(
                 self._offline_adapter_plugin_ids.update(result.unloaded_plugins)
                 self._notify_status_changed()
                 failed_plugins.update(result.failed_plugins)
+
+            from src.chat.heart_flow.heartflow_manager import heartflow_manager
+
+            # 卸载完成后按实际剩余链路复用名单清理，取消思考和唤醒任务。
+            # 部分适配器卸载失败时，仍有可用链路的会话继续运行。
+            await heartflow_manager.close_policy_blocked_chats()
 
             return AdapterRuntimeTransitionResult(
                 success=not failed_plugins,
@@ -1354,6 +1477,34 @@ class PluginRuntimeManager(
         except Exception as exc:
             logger.warning(f"插件 {plugin_id} 运行时配置校验不可用，将回退到静态 Schema: {exc}")
             return None
+
+    async def config_widgets(self, plugin_id: str, action_id: Optional[str] = None) -> Dict[str, Any]:
+        """将请求送到插件所属 Runner，只允许已启动的运行时实例。"""
+        if not self._started:
+            raise RuntimeError("插件运行时未启动")
+        supervisor = self._get_supervisor_for_plugin(plugin_id)
+        if supervisor is None:
+            raise RuntimeError("插件未运行")
+        return await supervisor.config_widgets(plugin_id, action_id)
+
+    def get_desktop_pet_button_plugins(self) -> Dict[str, Any]:
+        if not self._started:
+            return {}
+        plugins: Dict[str, Any] = {}
+        for supervisor in self.supervisors:
+            for plugin_id, contribution in supervisor.get_desktop_pet_button_plugins().items():
+                if plugin_id in plugins:
+                    raise ValueError(f"桌宠按钮插件重复注册: {plugin_id}")
+                plugins[plugin_id] = contribution
+        return plugins
+
+    async def desktop_pet_buttons(self, plugin_id: str, button_id: Optional[str] = None) -> Dict[str, Any]:
+        if not self._started:
+            raise RuntimeError("插件运行时未启动")
+        supervisor = self._get_supervisor_for_plugin(plugin_id)
+        if supervisor is None:
+            raise RuntimeError("插件未运行")
+        return await supervisor.desktop_pet_buttons(plugin_id, button_id)
 
     async def inspect_plugin_config(
         self,

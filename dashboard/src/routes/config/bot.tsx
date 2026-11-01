@@ -18,6 +18,8 @@ import {
 } from 'lucide-react'
 import { parse as parseToml } from 'smol-toml'
 
+import { DesktopPetSkinField } from '@/components/DesktopPetSkinField'
+import { AgentACPField, AgentConnectionSettings, AgentCustomArgs, AgentDesktopField } from '@/components/agent/AgentConnectionSettings'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   AlertDialog,
@@ -39,6 +41,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
@@ -73,6 +76,7 @@ import {
   ChatTalkValueRulesHook,
   ExpressionGroupsHook,
   ExpressionLearningListHook,
+  LearningBlacklistHook,
   FocusWhitelistHook,
   JargonGroupsHook,
   JargonLearningListHook,
@@ -81,11 +85,13 @@ import {
   MCPRootItemsHook,
   MCPServersHook,
   MultipleReplyStyleHook,
+  PrivateReplyPauseRulesHook,
   RegexRulesHook,
   useAutoSave,
 } from './bot/hooks'
 import { CommandPermissions } from './bot/CommandPermissions'
 import { GlobalLearningSettings } from './bot/GlobalLearningSettings'
+import { PersonalityProfiles } from './bot/PersonalityProfiles'
 import { MemorySwitchGuard, MemorySwitchProvider } from './bot/MemorySwitchGuard'
 
 type ConfigSectionData = Record<string, unknown>
@@ -339,6 +345,16 @@ function BotConfigPageContent() {
 
   useEffect(() => {
     const hookEntries = [
+      ['desktop_pet.skin_id', DesktopPetSkinField],
+      ['agent.connection', AgentConnectionSettings, 'wrapper'],
+      ['agent.desktop_manifest', AgentDesktopField, 'wrapper'],
+      ['agent.acp_args', AgentCustomArgs, 'wrapper'],
+      ['agent.acp_command', AgentACPField, 'wrapper'],
+      ['agent.acp_cwd', AgentACPField, 'wrapper'],
+      ['agent.acp_env', AgentACPField, 'wrapper'],
+      ['agent.acp_model', AgentACPField, 'wrapper'],
+      ['agent.acp_timeout', AgentACPField, 'wrapper'],
+
       ['bot.platform', HiddenFieldHook, 'hidden'],
       ['bot.alias_names', AliasNamesHook],
       ['bot.qq_account', HiddenFieldHook, 'hidden'],
@@ -346,10 +362,13 @@ function BotConfigPageContent() {
       ['personality.multiple_reply_style', MultipleReplyStyleHook],
       ['chat.reply_style.chat_prompts', ChatPromptsHook],
       ['chat.reply_timing.talk_value_rules', ChatTalkValueRulesHook],
+      ['chat.reply_timing.private_reply_pause_rules', PrivateReplyPauseRulesHook],
       ['experimental.focus_chat_whitelist', FocusWhitelistHook],
       ['experimental.focus_groups', FocusGroupsHook],
       ['expression.expression_groups', ExpressionGroupsHook],
       ['expression.learning_list', ExpressionLearningListHook],
+      ['expression.learning_blacklist', LearningBlacklistHook],
+      ['jargon.learning_blacklist', LearningBlacklistHook],
       ['jargon.jargon_groups', JargonGroupsHook],
       ['jargon.learning_list', JargonLearningListHook],
       ['a_memorix.global_memory_sharing_enabled', HiddenFieldHook, 'hidden'],
@@ -558,6 +577,28 @@ function BotConfigPageContent() {
   }
   // 保留给后续恢复重启入口或快捷操作复用；当前页面不渲染重启按钮。
   void handleSaveAndRestart
+
+  const savePersonality = async (value: ConfigSectionData) => {
+    const { group_chat_prompt, private_chat_prompts, ...personality } = value
+    const chat = {
+      ...sectionValues.chat,
+      reply_style: {
+        ...(sectionValues.chat?.reply_style as ConfigSectionData),
+        group_chat_prompt,
+        private_chat_prompts,
+      },
+    }
+    const configToSave = { ...buildFullConfig(), personality, chat }
+    setSectionValues((current) => ({ ...current, personality, chat }))
+    // 标记两部分的待保存修订，再通过现有写入屏障一次保存，避免分区自动保存竞争。
+    triggerAutoSave('personality', personality)
+    triggerAutoSave('chat', chat)
+    try {
+      await runWithAutoSaveBarrier(() => updateBotConfig(configToSave))
+    } catch (error) {
+      toast({ title: '保存人设失败', description: (error as Error).message, variant: 'destructive' })
+    }
+  }
 
   // 根据 schema 构建 tab 分组
   const tabGroups = useMemo(() => {
@@ -872,6 +913,7 @@ function BotConfigPageContent() {
             tabGroups={tabGroups}
             sectionValues={sectionValues}
             setSectionValue={setSectionValue}
+            onPersonalityChange={savePersonality}
             setHasUnsavedChanges={setHasUnsavedChanges}
             searchFieldPath={searchFieldPath}
           />
@@ -926,6 +968,7 @@ function updateNestedValue(
 }
 
 interface DynamicConfigTabsProps {
+  onPersonalityChange: (value: ConfigSectionData) => Promise<void>
   activeTab: string
   setActiveTab: (tab: string) => void
   advancedVisible: boolean
@@ -968,11 +1011,13 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
     sectionValues,
     setHasUnsavedChanges,
     setSectionValue,
+    onPersonalityChange,
     tabGroups,
   } = props
   const initialActiveTab = tabGroups[0]?.id ?? ''
   const [expandedSubtabGroups, setExpandedSubtabGroups] = useState<Record<string, boolean>>({})
   const [activeSubtabByGroup, setActiveSubtabByGroup] = useState<Record<string, string>>({})
+  const [alternateStylesOpen, setAlternateStylesOpen] = useState(false)
   const [experimentalNoticeOpen, setExperimentalNoticeOpen] = useState(
     () =>
       initialActiveTab === 'experimental' &&
@@ -1006,6 +1051,9 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
     const frameId = window.requestAnimationFrame(() => {
       setActiveTab(targetTab.id)
       setAdvancedVisible(true)
+      if (searchFieldPath === 'personality.multiple_probability' || searchFieldPath === 'personality.multiple_reply_style') {
+        setAlternateStylesOpen(true)
+      }
 
       if (subcategoryName) {
         const isChatQuoteField = searchFieldPath === 'chat.reply_style.private_quote_frequency' ||
@@ -1045,7 +1093,7 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
         window.cancelAnimationFrame(nestedFrameId)
       }
     }
-  }, [activeSubtabByGroup, activeTab, advancedVisible, searchFieldPath])
+  }, [activeSubtabByGroup, activeTab, advancedVisible, alternateStylesOpen, searchFieldPath])
 
   if (tabGroups.length === 0 || !configSchema?.nested) {
     return null
@@ -1072,7 +1120,7 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
   const chatQuoteFieldNames = new Set(['private_quote_frequency', 'group_quote_frequency'])
   const basicChatContextFieldNames = new Set(['max_context_size', 'max_private_context_size'])
   const basicChatTimingFieldNames = new Set([
-    'talk_value', 'private_talk_value', 'mentioned_bot_reply', 'inevitable_at_reply', 'reply_trigger_mode',
+    'talk_value', 'private_reply_paused', 'mentioned_bot_reply', 'inevitable_at_reply',
   ])
   const botSchema = configSchema.nested.bot
   const chatSchema = configSchema.nested.chat
@@ -1100,7 +1148,18 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
       .map((field) => ({ ...field, advanced: false, 'x-row': 'chat-quote-frequency' })),
     nested: {},
   } : null
-  const hasPersonalitySchema = Boolean(configSchema.nested.personality)
+  const personalitySchema = configSchema.nested.personality
+  const hasPersonalitySchema = Boolean(personalitySchema)
+  const alternateStyleFieldNames = ['multiple_probability', 'multiple_reply_style']
+  // 备用风格集中放在表达风格后的浮层中，不再依赖全局高级设置。
+  const alternateStyleSchema: ConfigSchema | null = personalitySchema ? {
+    ...personalitySchema,
+    fields: alternateStyleFieldNames.flatMap((name) => {
+      const field = personalitySchema.fields.find((item) => item.name === name)
+      return field ? [{ ...field, advanced: false }] : []
+    }),
+    nested: {},
+  } : null
   const identitySchema: ConfigSchema | null = botSchema ? {
     ...botSchema,
     fields: botSchema.fields
@@ -1132,9 +1191,17 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
       schema: { ...schema, fields: [{ ...field, label, advanced: false }], nested: {} },
     }]
   })
-  const sectionLeadingContent = identitySchema ? {
+  const sectionLeadingContent = {
     personality: (
       <div className="space-y-3">
+        <PersonalityProfiles
+          values={{
+            ...sectionValues.personality,
+            group_chat_prompt: (sectionValues.chat?.reply_style as ConfigSectionData)?.group_chat_prompt,
+            private_chat_prompts: (sectionValues.chat?.reply_style as ConfigSectionData)?.private_chat_prompts,
+          }}
+          onChange={(value) => { void onPersonalityChange(value) }}
+        />
         {identitySchema && (
           <DynamicConfigForm
             schema={identitySchema}
@@ -1147,7 +1214,7 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
         )}
       </div>
     ),
-  } : undefined
+  }
   const sectionTrailingContent = {
     personality: (
       <GlobalLearningSettings
@@ -1157,18 +1224,45 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
       />
     ),
   }
-  const fieldTrailingContent = basicChatPromptSchema ? {
+  const fieldTrailingContent = {
     'personality.reply_style': (
-      <DynamicConfigForm
-        schema={basicChatPromptSchema}
-        values={(sectionValues.chat?.reply_style as ConfigSectionData) ?? {}}
-        onChange={(field, value) => updateSectionValueByPath('chat', ['reply_style', field], value)}
-        basePath="chat.reply_style"
-        hooks={fieldHooks}
-        advancedVisible={advancedVisible}
-      />
+      <div className="space-y-3">
+        {alternateStyleSchema && alternateStyleSchema.fields.length > 0 && (
+          <Popover open={alternateStylesOpen} onOpenChange={setAlternateStylesOpen}>
+            <PopoverTrigger asChild>
+              <Button type="button" variant="outline" size="sm">
+                备用表达风格
+                <ChevronDown className={cn('ml-2 h-4 w-4 transition-transform', alternateStylesOpen && 'rotate-180')} />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="start"
+              className="max-h-[min(24rem,var(--radix-popover-content-available-height))] w-[28rem] max-w-[calc(100vw-2rem)] overflow-y-auto p-3"
+              aria-label="备用表达风格设置"
+            >
+              <DynamicConfigForm
+                schema={alternateStyleSchema}
+                values={sectionValues.personality ?? {}}
+                onChange={(field, value) => updateSectionValueByPath('personality', [field], value)}
+                basePath="personality"
+                hooks={fieldHooks}
+              />
+            </PopoverContent>
+          </Popover>
+        )}
+        {basicChatPromptSchema && (
+          <DynamicConfigForm
+            schema={basicChatPromptSchema}
+            values={(sectionValues.chat?.reply_style as ConfigSectionData) ?? {}}
+            onChange={(field, value) => updateSectionValueByPath('chat', ['reply_style', field], value)}
+            basePath="chat.reply_style"
+            hooks={fieldHooks}
+            advancedVisible={advancedVisible}
+          />
+        )}
+      </div>
     ),
-  } : undefined
+  }
 
   // 仅调整展示归属，身份信息与聊天提示词仍通过原配置路径读写。
   const getDisplaySectionSchema = (sectionName: string, schema: ConfigSchema): ConfigSchema => {
@@ -1176,7 +1270,12 @@ function DynamicConfigTabs(props: DynamicConfigTabsProps) {
       return { ...schema, fields: schema.fields.filter((field) => !identityFieldNames.has(field.name)) }
     }
     if (sectionName === 'personality') {
-      return { ...schema, uiLabel: '身份与人格' }
+      return {
+        ...schema,
+        uiLabel: '身份与人格',
+        fields: schema.fields.filter((field) => ![...alternateStyleFieldNames, 'profiles', 'selected_profile'].includes(field.name)),
+        nested: Object.fromEntries(Object.entries(schema.nested ?? {}).filter(([name]) => name !== 'profiles')),
+      }
     }
     if (sectionName === 'chat' && replyStyleSchema) {
       return {

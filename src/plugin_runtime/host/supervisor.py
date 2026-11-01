@@ -29,6 +29,7 @@ from src.plugin_runtime import (
     ENV_BLOCKED_PLUGIN_REASONS,
     ENV_EXTERNAL_PLUGIN_IDS,
     ENV_FORCE_PLUGIN_COMPATIBILITY,
+    ENV_HOST_PID,
     ENV_HOST_VERSION,
     ENV_IPC_ADDRESS,
     ENV_LOCAL_PLUGIN_SDK_PATH,
@@ -43,6 +44,7 @@ from src.plugin_runtime.compat_policy import (
     build_force_plugin_compatibility_env,
     is_force_plugin_compatibility_enabled,
 )
+from src.plugin_runtime.desktop_pet_buttons import DesktopPetButtonSnapshot
 from src.plugin_runtime.local_sdk import build_pythonpath_with_local_sdk
 from src.plugin_runtime.protocol.envelope import (
     BootstrapPluginPayload,
@@ -188,10 +190,13 @@ class PluginRunnerSupervisor:
             codec=codec,
             host_version=self._host_version,
             logger_name=self._logger_name,
+            connection_lost_callback=self._handle_usage_connection_lost,
         )
 
         self._runner_process: Optional[asyncio.subprocess.Process] = None
         self._registered_plugins: Dict[str, RegisterPluginPayload] = {}
+        # 注册早于 on_load 完成；只在 Runner 确认加载成功后才开始累计使用时长。
+        self._usage_loaded_plugin_ids: Set[str] = set()
         self._message_gateway_states: Dict[str, Dict[str, _MessageGatewayRuntimeState]] = {}
         self._external_available_plugins: Dict[str, str] = {}
         self._blocked_plugin_reasons: Dict[str, str] = {}
@@ -306,6 +311,21 @@ class PluginRunnerSupervisor:
 
         return sorted(self._registered_plugins.keys())
 
+    def get_usage_active_plugin_ids(self) -> Set[str]:
+        """返回当前真正完成加载且 Runner 仍存活、连接正常的插件。"""
+        process = self._runner_process
+        if not self._running or process is None or process.returncode is not None or not self._rpc_server.is_connected:
+            return set()
+        return {
+            plugin_id for plugin_id in self._usage_loaded_plugin_ids
+            if (registration := self._registered_plugins.get(plugin_id)) is not None and not registration.config_error
+        }
+
+    def _handle_usage_connection_lost(self) -> None:
+        """断连时立即停止累计，避免把等待健康检查和重启的间隔算作使用时长。"""
+        self._usage_loaded_plugin_ids.clear()
+        self._notify_status_changed()
+
     def get_plugin_config_error(self, plugin_id: str) -> str:
         """返回已加载插件的配置错误；非空时业务组件未注册。"""
         registration = self._registered_plugins.get(plugin_id)
@@ -402,6 +422,8 @@ class PluginRunnerSupervisor:
 
         disabled_set.update(explicitly_disabled_plugins)
         self._plugin_recovery_targets.difference_update(explicitly_disabled_plugins)
+        self._usage_loaded_plugin_ids.update(reloaded_plugins)
+        self._usage_loaded_plugin_ids.difference_update(inactive_plugins, explicitly_disabled_plugins, failed_plugins)
 
         self._runner_ready_payloads = RunnerReadyPayload(
             loaded_plugins=sorted(loaded_set),
@@ -417,6 +439,7 @@ class PluginRunnerSupervisor:
         """从最近一次 Runner 加载状态中移除已卸载插件。"""
 
         unloaded_set = set(unloaded_plugins)
+        self._usage_loaded_plugin_ids.difference_update(unloaded_set)
         self._plugin_recovery_targets.difference_update(unloaded_set)
         self._runner_ready_payloads = RunnerReadyPayload(
             loaded_plugins=sorted(set(self._runner_ready_payloads.loaded_plugins) - unloaded_set),
@@ -610,6 +633,8 @@ class PluginRunnerSupervisor:
             return
 
         self._running = False
+        self._usage_loaded_plugin_ids.clear()
+        self._notify_status_changed()
         self._plugin_recovery_targets.clear()
         self._plugin_recovery_attempts.clear()
         self._rpc_server.abort_pending_requests("PluginRunnerSupervisor 正在停止")
@@ -953,6 +978,45 @@ class PluginRunnerSupervisor:
             raise ValueError("插件配置校验失败")
         return dict(result.normalized_config)
 
+    async def config_widgets(self, plugin_id: str, action_id: Optional[str] = None) -> Dict[str, Any]:
+        """读取配置页控件或执行声明的按钮，不写入配置。"""
+        self._ensure_accepting_runner_rpc()
+        response = await self._rpc_server.send_request(
+            "plugin.config_widgets", plugin_id=plugin_id,
+            payload={"action_id": action_id}, timeout_ms=10000,
+        )
+        if response.error:
+            raise ValueError(str(response.error.get("message", "配置页运行时请求失败")))
+        return response.payload
+
+    def get_desktop_pet_button_plugins(self) -> Dict[str, Any]:
+        """直接使用注册表生命周期；插件卸载或 Runner 退出后贡献立即消失。"""
+        return {
+            plugin_id: {"name": registration.display_name, "buttons": [button.model_dump() for button in registration.desktop_pet_buttons]}
+            for plugin_id, registration in self._registered_plugins.items()
+            if registration.desktop_pet_buttons and not registration.config_error
+        }
+
+    async def desktop_pet_buttons(self, plugin_id: str, button_id: Optional[str] = None) -> Dict[str, Any]:
+        self._ensure_accepting_runner_rpc()
+        registration = self._registered_plugins.get(plugin_id)
+        if registration is None or not registration.desktop_pet_buttons:
+            raise ValueError("插件未注册桌宠按钮")
+        if button_id is not None and button_id not in {button.id for button in registration.desktop_pet_buttons}:
+            raise ValueError("未声明的桌宠按钮")
+        response = await self._rpc_server.send_request(
+            "plugin.desktop_pet_buttons", plugin_id=plugin_id,
+            payload={"button_id": button_id}, timeout_ms=10000 if button_id else 4000,
+        )
+        if response.error:
+            raise ValueError(str(response.error.get("message", "桌宠按钮请求失败")))
+        if self._registered_plugins.get(plugin_id) is not registration:
+            raise ValueError("插件已发生卸载或重载，请重试")
+        snapshot = DesktopPetButtonSnapshot.model_validate(response.payload)
+        if snapshot.buttons != registration.desktop_pet_buttons:
+            raise ValueError("桌宠按钮声明发生变化，请重载插件")
+        return snapshot.model_dump()
+
     async def inspect_plugin_config(
         self,
         plugin_id: str,
@@ -1260,6 +1324,7 @@ class PluginRunnerSupervisor:
             removed_llm_providers = client_registry.unregister_plugin_providers(payload.plugin_id)
         self._authorization.revoke_permission_token(payload.plugin_id)
         removed_registration = self._registered_plugins.pop(payload.plugin_id, None) is not None
+        self._usage_loaded_plugin_ids.discard(payload.plugin_id)
         await self._unregister_all_message_gateway_drivers_for_plugin(payload.plugin_id)
         self._message_gateway_states.pop(payload.plugin_id, None)
         self._notify_status_changed()
@@ -1398,6 +1463,7 @@ class PluginRunnerSupervisor:
         plugin_id: str,
         gateway_entry: Any,
         route_key: RouteKey,
+        protocol: Optional[str] = None,
     ) -> None:
         """为消息网关注册驱动并绑定发送/接收路由。
 
@@ -1405,6 +1471,7 @@ class PluginRunnerSupervisor:
             plugin_id: 插件 ID。
             gateway_entry: 消息网关组件条目。
             route_key: 当前链路对应的路由键。
+            protocol: 当前连接上报的协议或实现名称；未提供时使用网关声明。
         """
 
         await self._unregister_message_gateway_driver(plugin_id, gateway_entry.name)
@@ -1420,10 +1487,10 @@ class PluginRunnerSupervisor:
             supports_send=bool(gateway_entry.supports_send),
             supervisor=self,
             metadata={
-                "protocol": gateway_entry.protocol,
                 "route_type": gateway_entry.route_type,
                 "plugin_type": str(getattr(self._registered_plugins.get(plugin_id), "plugin_type", "") or "").strip(),
                 **gateway_entry.metadata,
+                "protocol": gateway_entry.protocol if protocol is None else protocol,
             },
         )
 
@@ -1443,10 +1510,10 @@ class PluginRunnerSupervisor:
         binding_metadata = {
             "plugin_id": plugin_id,
             "gateway_name": gateway_entry.name,
-            "protocol": gateway_entry.protocol,
             "route_type": gateway_entry.route_type,
             "plugin_type": str(getattr(self._registered_plugins.get(plugin_id), "plugin_type", "") or "").strip(),
             **gateway_entry.metadata,
+            "protocol": gateway_entry.protocol if protocol is None else protocol,
         }
         binding = RouteBinding(
             route_key=route_key,
@@ -1701,6 +1768,9 @@ class PluginRunnerSupervisor:
 
         try:
             if payload.ready:
+                protocol = payload.metadata.get("protocol")
+                if "protocol" in payload.metadata and not isinstance(protocol, str):
+                    raise ValueError("消息网关运行时 protocol 必须是字符串")
                 route_key = self._build_message_gateway_route_key(gateway_entry, payload)
                 if route_key.account_id:
                     await asyncio.to_thread(
@@ -1714,7 +1784,9 @@ class PluginRunnerSupervisor:
                         ),
                         BOT_ACCOUNT_SOURCE_READY,
                     )
-                await self._register_message_gateway_driver(envelope.plugin_id, gateway_entry, route_key)
+                await self._register_message_gateway_driver(
+                    envelope.plugin_id, gateway_entry, route_key, protocol=protocol
+                )
             else:
                 await self._unregister_message_gateway_driver(envelope.plugin_id, gateway_entry.name)
             runtime_state, route_key_dict = self._apply_message_gateway_state(
@@ -1812,8 +1884,8 @@ class PluginRunnerSupervisor:
                 metadata={
                     "plugin_id": envelope.plugin_id,
                     "gateway_name": gateway_entry.name,
-                    "protocol": gateway_entry.protocol,
                     **payload.route_metadata,
+                    "protocol": runtime_state.metadata.get("protocol", gateway_entry.protocol),
                 },
             )
         )
@@ -1842,6 +1914,7 @@ class PluginRunnerSupervisor:
             return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, str(exc))
 
         self._runner_ready_payloads = payload
+        self._usage_loaded_plugin_ids = set(payload.loaded_plugins)
         if payload.failed_plugins:
             failed_details = [
                 f"{plugin_id}: {payload.failed_plugin_reasons.get(plugin_id, '未知原因')}"
@@ -1869,6 +1942,7 @@ class PluginRunnerSupervisor:
                 is_force_plugin_compatibility_enabled()
             ),
             ENV_HOST_VERSION: self._host_version,
+            ENV_HOST_PID: str(os.getpid()),
             ENV_IPC_ADDRESS: self._transport.get_address(),
             ENV_PLUGIN_DIRS: os.pathsep.join(str(path) for path in self._plugin_dirs),
             ENV_PLUGIN_TYPE_FILTER: self._plugin_type_filter,
@@ -1938,6 +2012,8 @@ class PluginRunnerSupervisor:
         Args:
             reason: 关停原因。
         """
+        self._usage_loaded_plugin_ids.clear()
+        self._notify_status_changed()
         process = self._runner_process
         if process is None:
             return
@@ -2258,6 +2334,7 @@ class PluginRunnerSupervisor:
         self._api_registry.clear()
         self._component_registry.clear()
         self._registered_plugins.clear()
+        self._usage_loaded_plugin_ids.clear()
         self._message_gateway_states.clear()
         self._runner_ready_events = asyncio.Event()
         self._runner_ready_payloads = RunnerReadyPayload()

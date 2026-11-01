@@ -169,12 +169,60 @@ export interface SelfUpdateStatus {
   last_result: SelfUpdateResult | null
 }
 
+/** 开发预览：保留在 URL 中，刷新和切换页面后仍可继续调整更新 UI。 */
+function getMockSelfUpdateStatus(): SelfUpdateStatus | null {
+  if (!import.meta.env.DEV) return null
+  const scenario = new URLSearchParams(window.location.search).get('mockUpdate')
+  if (scenario !== 'available' && scenario !== 'blocked' && scenario !== 'latest') return null
+
+  const available = scenario !== 'latest'
+  const blocked = scenario === 'blocked'
+  return {
+    supported: true,
+    deployment_type: 'git',
+    repository_url: 'https://github.com/Mai-with-u/MaiBot.git',
+    current_version: '1.3.13',
+    current_commit: '1111111111111111111111111111111111111111',
+    branch: 'dev',
+    checked_at: Date.now() / 1000,
+    latest_version: available ? '1.3.14' : '1.3.13',
+    latest_commit: available
+      ? '2222222222222222222222222222222222222222'
+      : '1111111111111111111111111111111111111111',
+    behind: available ? 3 : 0,
+    ahead: 0,
+    update_available: available,
+    can_apply: available && !blocked,
+    blockers: blocked ? ['dirty_worktree'] : [],
+    dirty_files: blocked ? ['src/mock-preview.py'] : [],
+    dependencies_changed: available,
+    dependency_tool: 'uv',
+    commits: available ? [
+      { short_id: '22222222', summary: 'feat: 模拟新功能，用于更新界面预览', committed_at: new Date().toISOString() },
+      { short_id: '33333333', summary: 'fix: 模拟问题修复', committed_at: new Date().toISOString() },
+      { short_id: '44444444', summary: 'chore: 模拟依赖更新', committed_at: new Date().toISOString() },
+    ] : [],
+    source_id: 'github',
+    source_name: '本地模拟更新源',
+    last_result: null,
+  }
+}
+
 /** 读取自更新状态（不联网） */
 export async function getSelfUpdateStatus(): Promise<SelfUpdateStatus> {
-  return backendApi.get<SelfUpdateStatus>('/api/webui/system/self-update/status', {
-    errorMessage: '获取更新状态失败',
-    signal: AbortSignal.timeout(8000),
-  })
+  const mock = getMockSelfUpdateStatus()
+  if (mock) return mock
+  const signal = AbortSignal.timeout(8000)
+  try {
+    return await backendApi.get<SelfUpdateStatus>('/api/webui/system/self-update/status', {
+      errorMessage: '获取更新状态失败', signal,
+    })
+  } catch (error) {
+    if (signal.aborted) {
+      throw new Error('读取本地更新状态超时（8 秒）：WebUI 后端未及时响应，此步骤没有连接 CNB 或 GitHub。', { cause: error })
+    }
+    throw error
+  }
 }
 
 export interface SelfUpdateSourceSelection {
@@ -191,12 +239,67 @@ export function getSelfUpdateCustomPrefix(): string {
 }
 
 /** 使用本次选中的来源检查本体更新，所有入口共享后端判断和状态通知。 */
-export async function checkSelfUpdate(source: SelfUpdateSourceSelection): Promise<SelfUpdateStatus> {
-  const status = await backendApi.post<SelfUpdateStatus>('/api/webui/system/self-update/check', {
-    body: source,
-    errorMessage: '检查更新失败',
-    signal: AbortSignal.timeout(20000),
-  })
+export async function checkSelfUpdate(
+  source: SelfUpdateSourceSelection,
+  force = true,
+  onProgress?: (message: string) => void,
+): Promise<SelfUpdateStatus> {
+  const mock = getMockSelfUpdateStatus()
+  if (mock) {
+    window.dispatchEvent(new CustomEvent<SelfUpdateStatus>(SELF_UPDATE_STATUS_EVENT, { detail: mock }))
+    return mock
+  }
+  const signal = AbortSignal.timeout(65000)
+  const progress: string[] = []
+  let status: SelfUpdateStatus | null = null
+  try {
+    const response = await backendApi.post<Response>('/api/webui/system/self-update/check-stream', {
+      body: { ...source, force }, errorMessage: '检查更新失败', signal, parse: 'response',
+    })
+    if (!response.body) throw new Error('更新检查接口未返回进度流')
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    const processLine = (line: string) => {
+      if (!line.trim()) return
+      const event = JSON.parse(line) as
+        | { type: 'progress'; message: string }
+        | { type: 'result'; status: SelfUpdateStatus }
+        | { type: 'error'; message: string }
+        | { type: 'heartbeat' }
+      if (event.type === 'progress') {
+        progress.push(event.message)
+        onProgress?.(event.message)
+      } else if (event.type === 'result') {
+        status = event.status
+      } else if (event.type === 'error') {
+        throw new Error(event.message)
+      }
+    }
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) {
+          buffer += decoder.decode()
+          break
+        }
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        lines.forEach(processLine)
+      }
+      processLine(buffer)
+    } finally {
+      reader.releaseLock()
+    }
+    if (!status) throw new Error('更新检查连接已结束，但未收到检查结果')
+  } catch (error) {
+    const lastProgress = progress.length ? progress.slice(-6).join('\n') : '尚未收到后端检查进度'
+    if (signal.aborted) {
+      throw new Error(`等待更新检查响应超时（65 秒）。最后进度：\n${lastProgress}\n尚未收到最终结果，请查看后端「检查更新」日志确认具体原因。`, { cause: error })
+    }
+    throw error
+  }
   if (source.source_id === 'custom' && source.custom_prefix?.trim()) {
     localStorage.setItem(SELF_UPDATE_CUSTOM_PREFIX_KEY, source.custom_prefix.trim())
   }
@@ -215,10 +318,10 @@ export async function checkSelfUpdateOnStartup(): Promise<SelfUpdateStatus> {
     const local = await getSelfUpdateStatus()
     if (!local.supported) return local
     // 包安装沿用现有 PyPI 检查，Git 镜像仅适用于源码部署。
-    if (local.deployment_type === 'package') return checkSelfUpdate({ source_id: 'pypi' })
+    if (local.deployment_type === 'package') return checkSelfUpdate({ source_id: 'pypi' }, false)
 
-    // 自动检查只读取官方 API；下载源在执行更新时选择，避免逐个探测镜像拖慢启动。
-    return checkSelfUpdate({ source_id: 'github' })
+    // 后端并发读取 GitHub / CNB 元数据，采用先成功的结果；下载源在执行更新时选择。
+    return checkSelfUpdate({ source_id: 'github' }, false)
   })()
   startupUpdateChecks.set(baseUrl, request)
   return request
@@ -229,6 +332,9 @@ export async function applySelfUpdate(
   expectedCommit: string,
   source: SelfUpdateSourceSelection
 ): Promise<{ success: boolean; message: string }> {
+  if (getMockSelfUpdateStatus()) {
+    throw new Error('当前使用本地模拟更新源，仅供 UI 预览，不会执行更新或重启。')
+  }
   return backendApi.post<{ success: boolean; message: string }>(
     '/api/webui/system/self-update/apply',
     {

@@ -1,12 +1,10 @@
 import { Link } from '@tanstack/react-router'
 import {
   BookOpen,
-  Check,
   ChevronLeft,
   ChevronsUp,
   Database,
   FileText,
-  Globe,
   Moon,
   MoreHorizontal,
   Search,
@@ -35,9 +33,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -51,7 +46,7 @@ import type { WebUIExtension } from '@/lib/plugin-webui'
 import { splitWorkspaceTabs } from '@/lib/workspace-tabs'
 
 import { HeaderUpdateButton } from './HeaderUpdateButton'
-import { LANGUAGE_CODES, LANGUAGE_NAMES } from './language-options'
+import { TopbarMascot } from './TopbarMascot'
 import type { WorkspaceMode } from './types'
 
 const LOG_WORKSPACE_COMPACT_GAP = 12
@@ -97,7 +92,6 @@ type HeaderActionId =
   | 'update'
   | 'settings'
   | 'docs'
-  | 'language'
   | 'theme'
   | 'collapse'
   | 'extensions'
@@ -117,7 +111,7 @@ export function Header({
   topbarCollapsed,
   workspaceMode,
 }: HeaderProps) {
-  const { t, i18n: i18nInstance } = useTranslation()
+  const { t } = useTranslation()
   const [preloadMobileSearch, setPreloadMobileSearch] = useState(false)
 
   useEffect(() => {
@@ -153,7 +147,6 @@ export function Header({
   const expandedTopbarHeight = themeConfig.dashboardStyle === 'millennium' ? 52 : 42
   // 原版风格和千禧一样用顶栏里的按钮收起顶栏，不再显示顶栏下沿的滑条。
   const isModernStyle = themeConfig.dashboardStyle === 'modern'
-  const currentLang = i18nInstance.language || 'zh'
   const { config: headerBg, inheritedFrom } = useBackground('header')
   const inheritsPageBackground = inheritedFrom === 'page'
   const [searchQuery, setSearchQuery] = useState('')
@@ -164,7 +157,6 @@ export function Header({
   const [hoveredWorkspace, setHoveredWorkspace] = useState<WorkspaceMode | null>(null)
   const [workspaceHoverLocked, setWorkspaceHoverLocked] = useState(false)
   const [hoveredHeaderAction, setHoveredHeaderAction] = useState<HeaderActionId | null>(null)
-  const [languageMenuOpen, setLanguageMenuOpen] = useState(false)
   const logSwitcherShown = workspaceMode === 'logs' && !logSwitcherHidden
   const [logSwitcherSettled, setLogSwitcherSettled] = useState(logSwitcherShown)
   // 桌面端侧栏当前占据的布局宽度（px）；小屏侧栏不占布局，探针不显示，取 0。
@@ -288,9 +280,7 @@ export function Header({
     }
   }, [workspaceMode, workspaceTabsKey, themeConfig.dashboardStyle])
 
-  const activeHeaderAction: HeaderActionId | null = languageMenuOpen ? 'language' : null
-  const highlightedHeaderAction =
-    hoveredWorkspace === null ? (hoveredHeaderAction ?? activeHeaderAction) : null
+  const highlightedHeaderAction = hoveredWorkspace === null ? hoveredHeaderAction : null
 
   const handleHeaderActionEnter = (action: HeaderActionId) => {
     if (headerActionTimerRef.current !== null) {
@@ -385,12 +375,14 @@ export function Header({
           <button
             type="button"
             data-dashboard-topbar-toggle="true"
+            data-topbar-mascot-toggle="true"
             onClick={onTopbarToggle}
             aria-label={t('header.expandTopbar')}
             aria-expanded={!topbarCollapsed}
             title={t('header.expandTopbar')}
             className="bg-foreground/70 relative z-10 h-2 w-24 transition-shadow"
           >
+            <TopbarMascot />
             <span className="sr-only">{t('header.expandTopbar')}</span>
           </button>
         </div>
@@ -731,46 +723,6 @@ export function Header({
               <BookOpen className="h-4 w-4" />
             </Button>
 
-            {/* 语言切换 */}
-            <div className="hidden sm:block">
-              <DropdownMenu open={languageMenuOpen} onOpenChange={setLanguageMenuOpen}>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    title={t('header.switchLanguage')}
-                    aria-label={t('header.switchLanguage')}
-                    data-dashboard-header-action="true"
-                    data-header-action-highlighted={
-                      highlightedHeaderAction === 'language' ? 'true' : 'false'
-                    }
-                    onPointerEnter={() => handleHeaderActionEnter('language')}
-                    onPointerLeave={handleHeaderActionLeave}
-                    onClick={() => setHoveredHeaderAction('language')}
-                    className="relative isolate border-0 bg-transparent shadow-none"
-                  >
-                    {renderHeaderActionPill('language')}
-                    <Globe className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  {LANGUAGE_CODES.map((code) => (
-                    <DropdownMenuItem
-                      key={code}
-                      onClick={() => i18nInstance.changeLanguage(code)}
-                      className={cn(
-                        'cursor-pointer',
-                        currentLang.split('-')[0] === code && 'text-primary font-semibold'
-                      )}
-                    >
-                      {currentLang.split('-')[0] === code && <Check className="mr-2 h-3 w-3" />}
-                      {LANGUAGE_NAMES[code]}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-
             {/* 主题切换按钮 */}
             <Button
               variant="ghost"
@@ -859,27 +811,6 @@ export function Header({
                   )}
                   {actualTheme === 'dark' ? t('header.switchToLight') : t('header.switchToDark')}
                 </DropdownMenuItem>
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger className="cursor-pointer gap-2">
-                    <Globe className="h-4 w-4" />
-                    {t('header.switchLanguage')}
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent alignOffset={-4}>
-                    {LANGUAGE_CODES.map((code) => (
-                      <DropdownMenuItem
-                        key={code}
-                        onClick={() => i18nInstance.changeLanguage(code)}
-                        className={cn(
-                          'cursor-pointer',
-                          currentLang.split('-')[0] === code && 'text-primary font-semibold'
-                        )}
-                      >
-                        {currentLang.split('-')[0] === code && <Check className="mr-2 h-3 w-3" />}
-                        {LANGUAGE_NAMES[code]}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

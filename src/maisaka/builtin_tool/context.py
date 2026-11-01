@@ -200,6 +200,7 @@ class BuiltinToolRuntimeContext:
                     ProcessedResponseSegment(
                         normalized_text,
                         quote_previous=segment.quote_previous,
+                        is_correction=segment.is_correction,
                     )
                 )
 
@@ -320,9 +321,6 @@ class BuiltinToolRuntimeContext:
     async def _resolve_emoji_attachment(self, raw_index: Any) -> EmojiComponent:
         """把 attach_emoji 参数解析为表情包组件。"""
 
-        from src.common.utils.image_path import resolve_stored_image_path
-        from src.emoji_system.emoji_manager import emoji_manager
-
         if type(raw_index) is not int or raw_index < 1:
             raise ValueError("attach_emoji 必须填写 show_emoji_list 拼图中的正整数序号。")
         emoji_hash = next(
@@ -335,9 +333,17 @@ class BuiltinToolRuntimeContext:
         )
         if emoji_hash is None:
             raise ValueError(f"表情包序号 {raw_index} 不在当前历史中，请先调用 show_emoji_list。")
+        return await self.load_emoji_attachment(emoji_hash)
+
+    @staticmethod
+    async def load_emoji_attachment(emoji_hash: str) -> EmojiComponent:
+        """按已确定的哈希加载表情，补充器可复用请求快照而不重查活动历史。"""
+        from src.common.utils.image_path import resolve_stored_image_path
+        from src.emoji_system.emoji_manager import emoji_manager
+
         selected_emoji = emoji_manager.get_emoji_by_hash(emoji_hash)
         if selected_emoji is None:
-            raise ValueError(f"表情包序号 {raw_index} 对应的表情已不可用，请重新调用 show_emoji_list。")
+            raise ValueError(f"表情包 {emoji_hash} 已不可用，请重新调用 show_emoji_list。")
 
         emoji_path = resolve_stored_image_path(selected_emoji.full_path)
         emoji_bytes = await asyncio.to_thread(emoji_path.read_bytes)
@@ -391,10 +397,14 @@ class BuiltinToolRuntimeContext:
             if segment.text.strip()
         ]
         attachment_args = dict(attachments or {})
+        raw_emoji = attachment_args.get("attach_emoji")
+        # 0 表示不附加表情包，与省略参数一致；其他无效类型仍交给严格校验。
+        if type(raw_emoji) is int and raw_emoji == 0:
+            raw_emoji = None
 
         if attachment_args.get("attach_at") and not global_config.chat.enable_reply_at:
             raise ValueError("回复时 @ 用户已关闭，不能使用 attach_at。")
-        if attachment_args.get("attach_emoji") is not None and not global_config.emoji.use_new_send_logic:
+        if raw_emoji is not None and not global_config.emoji.use_new_send_logic:
             raise ValueError("新表情包发送逻辑未开启，请使用 send_emoji 工具。")
 
         at_components = [
@@ -405,7 +415,6 @@ class BuiltinToolRuntimeContext:
             await self._resolve_image_attachment(raw_attachment)
             for raw_attachment in self._normalize_attachment_list(attachment_args.get("attach_pic"), "attach_pic")
         ]
-        raw_emoji = attachment_args.get("attach_emoji")
         emoji_components = [await self._resolve_emoji_attachment(raw_emoji)] if raw_emoji is not None else []
 
         if not at_components and not image_components and not emoji_components:

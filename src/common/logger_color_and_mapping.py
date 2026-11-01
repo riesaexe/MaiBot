@@ -82,6 +82,7 @@ MODULE_COLORS: Dict[str, Tuple[str, Optional[str], bool]] = {
     "webui.git_mirror": ("#878787", None, False),
     "webui.anti_crawler": ("#ff5f5f", None, False),
     "webui_server": ("#5f87ff", None, False),
+    "http_server": ("#5f87ff", None, False),
     "webui_system": ("#87afff", None, False),
     "stream_api": ("#ffd700", None, False),
     "config_api": ("#ffff00", None, False),
@@ -188,6 +189,7 @@ MODULE_ALIASES = {
     "webui.git_mirror": "WebUI镜像",
     "webui.anti_crawler": "WebUI反爬",
     "webui_server": "WebUI服务",
+    "http_server": "HTTP服务",
     "webui_system": "WebUI系统",
     "maisaka_runtime": "MaiSaka",
     "maisaka_monitor_event_store": "麦麦监控事件",
@@ -251,13 +253,11 @@ MODULE_ALIASES = {
     "maisaka_heuristic_memory": "启发式记忆",
     "maisaka_idle_backoff": "空闲退避",
     "maisaka_jargon_context": "黑话上下文",
-    "maisaka_mid_term_memory": "中期记忆",
+    "maisaka_context_compaction": "上下文压缩",
     "maisaka_monitor": "麦麦监控",
     "maisaka_monitor_message_payload": "监控消息载荷",
     "maisaka_person_profile_injector": "人物画像注入",
     "maisaka_reasoning_engine": "麦麦推理引擎",
-    "maisaka_reply_effect": "回复效果追踪",
-    "maisaka_reply_effect_storage": "回复效果存储",
     "maisaka_tool_post_execution": "工具执行后处理",
     "maisaka_visual_mode": "麦麦视觉模式",
     # 平台、MCP 与插件运行时
@@ -286,7 +286,6 @@ MODULE_ALIASES = {
     "remote": "远程服务",
     # WebUI
     "webui.ai_search": "WebUI智能搜索",
-    "webui.plugin_stats_proxy": "WebUI插件统计代理",
     "webui.websocket": "WebUI连接管理",
     "webui_data_transfer": "WebUI数据迁移",
     # A-Memorix
