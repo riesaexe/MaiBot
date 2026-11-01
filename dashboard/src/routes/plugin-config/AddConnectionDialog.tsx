@@ -30,7 +30,7 @@ function isOfficialAdapter(plugin: PluginInfo): boolean {
   }
 }
 
-function getDownloads(plugin: PluginInfo): number {
+function getDownloads(plugin: PluginInfo): number | undefined {
   return plugin.marketplace_stats?.downloads ?? plugin.downloads
 }
 
@@ -102,7 +102,13 @@ export function AddConnectionDialog({ onClose, onInstalled }: AddConnectionDialo
   const keyword = query.trim().toLowerCase()
   const visible = plugins.filter(plugin =>
     [plugin.id, plugin.manifest.name, plugin.manifest.description].some(value => value.toLowerCase().includes(keyword)))
-    .sort((left, right) => getDownloads(right) - getDownloads(left))
+    .sort((left, right) => {
+      const leftDownloads = getDownloads(left)
+      const rightDownloads = getDownloads(right)
+      if (leftDownloads === undefined) return rightDownloads === undefined ? 0 : 1
+      if (rightDownloads === undefined) return -1
+      return rightDownloads - leftDownloads
+    })
   const groups = [
     { title: '官方适配器', plugins: visible.filter(isOfficialAdapter) },
     { title: '社区适配器', plugins: visible.filter(plugin => !isOfficialAdapter(plugin)) },
@@ -139,7 +145,9 @@ export function AddConnectionDialog({ onClose, onInstalled }: AddConnectionDialo
                   <div className="min-w-0 flex-1">
                     <p className="font-medium">{plugin.manifest.name}</p>
                     <p className="text-muted-foreground text-sm">{plugin.manifest.description}</p>
-                    <p className="text-muted-foreground mt-1 text-xs">下载 {getDownloads(plugin).toLocaleString('zh-CN')} 次</p>
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      {getDownloads(plugin) === undefined ? '暂无下载统计' : `下载 ${getDownloads(plugin)?.toLocaleString('zh-CN')} 次`}
+                    </p>
                   </div>
                   <Button size="sm" variant="outline" disabled={plugin.installed || !gitAvailable} onClick={() => { setProgress(null); setSelected(plugin) }}>
                     {!plugin.installed && <Download className="h-4 w-4" />}{plugin.installed ? '已安装' : '下载安装'}

@@ -131,7 +131,9 @@ export function usePluginList() {
   const [checkingUpdates, setCheckingUpdates] = useState(!initialTarget.pluginId)
   const updateCheckStartedRef = useRef(false)
   const initialTargetHandledRef = useRef(false)
-  const installedRequestRef = useRef(0)
+  const refreshGenerationRef = useRef(0)
+  const refreshRequestRef = useRef<Promise<void> | null>(null)
+  const refreshPendingRef = useRef(false)
   const runtimeSubscriptionRef = useRef(0)
 
   const openPluginConfig = (plugin: InstalledPlugin, tabId?: string | null) => {
@@ -190,37 +192,50 @@ export function usePluginList() {
     }
   }
 
-  // 加载插件列表（含深链接自动选中）
-  const refreshPlugins = async (background = false) => {
-    const requestId = ++installedRequestRef.current
+  // 首次加载、手动刷新和运行时通知共用队列；请求期间的变化合并为下一轮后台刷新。
+  const refreshPlugins = (background = false): Promise<void> => {
+    refreshPendingRef.current = true
+    if (refreshRequestRef.current) return refreshRequestRef.current
+
+    const generation = refreshGenerationRef.current
     if (!background) setLoading(true)
-    try {
-      // 启停和状态通知同步刷新列表及导航，跳过缓存以获取最新运行状态。
-      const [allInstalled] = await Promise.all([
-        getInstalledPlugins({ forceRefresh: true }),
-        refreshPluginWebUI(true),
-      ])
-      if (requestId !== installedRequestRef.current) return
-      const installed = adapterOnly
-        ? allInstalled.filter((plugin) => getPluginType(plugin) === 'adapter')
-        : allInstalled
-      setPlugins(installed)
-      if (!initialTargetHandledRef.current && initialTarget.pluginId) {
-        const targetPlugin = installed.find((plugin) => plugin.id === initialTarget.pluginId)
-        if (targetPlugin) {
-          openPluginConfig(targetPlugin, initialTarget.tabId)
+    const request = (async () => {
+      try {
+        while (refreshPendingRef.current && generation === refreshGenerationRef.current) {
+          refreshPendingRef.current = false
+          // 导航单独刷新，列表不等待其请求结束；运行状态仍须跳过缓存。
+          void refreshPluginWebUI(true)
+          try {
+            const allInstalled = await getInstalledPlugins({ forceRefresh: true })
+            if (generation !== refreshGenerationRef.current) return
+            const installed = adapterOnly
+              ? allInstalled.filter((plugin) => getPluginType(plugin) === 'adapter')
+              : allInstalled
+            setPlugins(installed)
+            // 加载插件列表（含深链接自动选中）；第一轮返回即展示，不等待补刷。
+            if (!initialTargetHandledRef.current && initialTarget.pluginId) {
+              const targetPlugin = installed.find((plugin) => plugin.id === initialTarget.pluginId)
+              if (targetPlugin) {
+                openPluginConfig(targetPlugin, initialTarget.tabId)
+              }
+            }
+          } catch (error) {
+            if (generation !== refreshGenerationRef.current) return
+            toast({
+              title: '加载插件列表失败',
+              description: error instanceof Error ? error.message : '未知错误',
+              variant: 'destructive',
+            })
+          } finally {
+            if (generation === refreshGenerationRef.current) setLoading(false)
+          }
         }
+      } finally {
+        if (generation === refreshGenerationRef.current) refreshRequestRef.current = null
       }
-    } catch (error) {
-      if (requestId !== installedRequestRef.current) return
-      toast({
-        title: '加载插件列表失败',
-        description: error instanceof Error ? error.message : '未知错误',
-        variant: 'destructive',
-      })
-    } finally {
-      if (requestId === installedRequestRef.current) setLoading(false)
-    }
+    })()
+    refreshRequestRef.current = request
+    return request
   }
   const loadPlugins = () => refreshPlugins()
 
@@ -235,23 +250,9 @@ export function usePluginList() {
   useEffect(() => {
     const subscriptionId = ++runtimeSubscriptionRef.current
     let cancelled = false
-    let refreshing = false
-    let pending = false
-
-    // 合并连续注册通知；若请求期间又有变化，完成后再取一次，避免旧响应覆盖新状态。
-    const refreshFromRuntime = async () => {
-      pending = true
-      if (refreshing) return
-      refreshing = true
-      while (pending && !cancelled) {
-        pending = false
-        await refreshPlugins(true)
-      }
-      refreshing = false
-    }
     const removeListener = unifiedWsClient.addEventListener((message) => {
       if (message.domain === 'plugin_runtime' && message.topic === 'main') {
-        void refreshFromRuntime()
+        void refreshPlugins(true)
       }
     })
     void unifiedWsClient.subscribe('plugin_runtime', 'main').then(() => {
@@ -261,7 +262,9 @@ export function usePluginList() {
     }).catch((error) => console.error('订阅插件运行状态失败:', error))
     return () => {
       cancelled = true
-      installedRequestRef.current += 1
+      refreshGenerationRef.current += 1
+      refreshPendingRef.current = false
+      refreshRequestRef.current = null
       removeListener()
       void unifiedWsClient.unsubscribe('plugin_runtime', 'main').catch((error) => {
         console.error('退订插件运行状态失败:', error)

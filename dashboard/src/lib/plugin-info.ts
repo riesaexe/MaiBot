@@ -39,16 +39,12 @@ export function buildLocalPluginInfo(installedPlugin: InstalledPlugin): PluginIn
       default_locale: (installedPlugin.manifest.default_locale as string) || 'zh-CN',
       locales_path: installedPlugin.manifest.locales_path as string | undefined,
     },
-    downloads: 0,
-    rating: 0,
-    review_count: 0,
     installed: true,
     installed_version: installedPlugin.manifest.version,
     installed_release: installedPlugin.release,
     stats_ids: [installedPlugin.manifest.id].filter(Boolean) as string[],
     published_at: '',
     updated_at: '',
-    changelog: installedPlugin.changelog ?? undefined,
     source: 'local',
   }
 }

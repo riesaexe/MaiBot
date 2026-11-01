@@ -504,7 +504,6 @@ interface PluginDetailsPanelProps {
   repositoryUrl?: string
   documentationUrl?: string
   issuesUrl?: string
-  changelog?: string | null
 }
 
 type ComponentDisplayGroup = 'tool' | 'command'
@@ -704,17 +703,22 @@ function PluginDetailsPanel({
   repositoryUrl,
   documentationUrl,
   issuesUrl,
-  changelog,
 }: PluginDetailsPanelProps) {
   const [readme, setReadme] = useState('')
   const [readmeLoading, setReadmeLoading] = useState(true)
   const [readmeError, setReadmeError] = useState('')
+  const [changelog, setChangelog] = useState('')
+  const [changelogLoading, setChangelogLoading] = useState(true)
+  const [changelogError, setChangelogError] = useState('')
   const [loadedPluginId, setLoadedPluginId] = useState(plugin.id)
   if (loadedPluginId !== plugin.id) {
     setLoadedPluginId(plugin.id)
     setReadme('')
     setReadmeLoading(true)
     setReadmeError('')
+    setChangelog('')
+    setChangelogLoading(true)
+    setChangelogError('')
   }
 
   useEffect(() => {
@@ -735,6 +739,17 @@ function PluginDetailsPanel({
         if (!cancelled) {
           setReadmeLoading(false)
         }
+      })
+
+    fetchPluginDocument(plugin.id, 'changelog', { preferLocal: true })
+      .then((content) => {
+        if (!cancelled) setChangelog(content)
+      })
+      .catch((error) => {
+        if (!cancelled) setChangelogError(error instanceof Error ? error.message : '更新日志加载失败')
+      })
+      .finally(() => {
+        if (!cancelled) setChangelogLoading(false)
       })
 
     return () => {
@@ -867,7 +882,11 @@ function PluginDetailsPanel({
               <CardDescription>插件作者提供的版本变更记录。</CardDescription>
             </CardHeader>
             <CardContent className="p-3 pt-0 sm:p-3 sm:pt-0">
-              {changelog ? (
+              {changelogLoading ? (
+                <Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
+              ) : changelogError ? (
+                <p className="text-destructive text-sm">{changelogError}</p>
+              ) : changelog ? (
                 <ScrollArea className="h-[min(48vh,540px)] pr-4">
                   <MarkdownRenderer content={changelog} />
                 </ScrollArea>
@@ -919,7 +938,7 @@ interface PluginDocumentFloatingPanelProps {
 function PluginDocumentFloatingPanel({ plugin, onClose }: PluginDocumentFloatingPanelProps) {
   const [mode, setMode] = useState<PluginDocumentMode>('readme')
   const [readme, setReadme] = useState('')
-  const [changelog, setChangelog] = useState(plugin.changelog ?? '')
+  const [changelog, setChangelog] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [dragging, setDragging] = useState(false)
@@ -946,9 +965,7 @@ function PluginDocumentFloatingPanel({ plugin, onClose }: PluginDocumentFloating
           return
         }
 
-        const localChangelog = plugin.changelog?.trim()
-          ? plugin.changelog
-          : await fetchPluginDocument(plugin.id, 'changelog', { preferLocal: true })
+        const localChangelog = await fetchPluginDocument(plugin.id, 'changelog', { preferLocal: true })
         if (!cancelled) {
           setChangelog(localChangelog ?? '')
         }
@@ -968,7 +985,7 @@ function PluginDocumentFloatingPanel({ plugin, onClose }: PluginDocumentFloating
     return () => {
       cancelled = true
     }
-  }, [mode, plugin.changelog, plugin.id])
+  }, [mode, plugin.id])
 
   const movePanel = (clientX: number, clientY: number) => {
     const dragState = dragRef.current
@@ -1561,7 +1578,6 @@ function PluginConfigEditor({ plugin, onBack, initialTab }: PluginConfigEditorPr
             repositoryUrl={pluginRepositoryUrl}
             documentationUrl={manifestUrls?.documentation}
             issuesUrl={manifestUrls?.issues}
-            changelog={plugin.changelog}
           />
         </TabsContent>
       </Tabs>

@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
+import type { PluginStatsStatus } from '@/lib/plugin-stats'
 
 import { PluginIcon } from './PluginIcon'
 import type { GitStatus, MaimaiVersion, PluginInfo, PluginLoadProgress, PluginStatsData } from './types'
@@ -14,7 +15,8 @@ interface PluginCardProps {
   plugin: PluginInfo
   gitStatus: GitStatus | null
   maimaiVersion: MaimaiVersion | null
-  stats: PluginStatsData | undefined
+  stats: Partial<PluginStatsData> | undefined
+  statsStatus?: PluginStatsStatus
   loadProgress: PluginLoadProgress | null
   isAnyPluginInstalling?: boolean
   isLiking: boolean
@@ -76,6 +78,7 @@ export const PluginCard = memo(function PluginCard({
   gitStatus,
   maimaiVersion,
   stats,
+  statsStatus = 'ready',
   loadProgress,
   isAnyPluginInstalling = false,
   isLiking,
@@ -102,10 +105,11 @@ export const PluginCard = memo(function PluginCard({
     setTitleOverflow(Math.max(0, text.scrollWidth - viewport.clientWidth))
   }
 
-  const likeCount = stats?.likes ?? 0
-  const downloadCount = stats?.downloads ?? plugin.downloads ?? 0
-  const ratingValue = stats?.rating ?? plugin.rating ?? 0
-  const reviewCount = stats?.comment_count ?? plugin.review_count ?? 0
+  const likeCount = stats?.likes
+  const downloadCount = stats?.downloads
+  const ratingValue = stats?.rating
+  const reviewCount = stats?.comment_count
+  const hasStats = downloadCount !== undefined && ratingValue !== undefined && reviewCount !== undefined
   const isLiked = stats?.liked === true
   const isInstalling = loadProgress?.operation === 'install'
     && loadProgress.stage === 'loading'
@@ -241,38 +245,45 @@ export const PluginCard = memo(function PluginCard({
         <div className="min-w-0 space-y-2">
           <div data-plugin-card-toolbar="true" className="flex min-w-0 items-center justify-between gap-2">
             {/* 按实际内容宽度排列，三组读数等距，数字紧跟图标并在显示框内垂直居中。 */}
-            <div data-plugin-card-stats="true" className="grid min-w-max flex-1 grid-cols-[max-content_max-content_max-content] content-center items-center gap-x-3 font-mono text-xs leading-none tabular-nums text-muted-foreground">
-              <div className="flex items-center gap-1" title={`下载量：${downloadCount.toLocaleString()}`}>
-                <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span className="sr-only">下载</span>
-                <span
-                  data-plugin-stat-value="downloads"
-                  className={`flex h-3.5 items-center whitespace-nowrap text-left ${downloadCount !== 0 ? 'text-primary' : ''}`}
-                >
-                  {downloadCount >= 10_000 ? `${(downloadCount / 10_000).toFixed(1)}w` : downloadCount.toString()}
-                </span>
+            {statsStatus === 'ready' && hasStats ? (
+              <div data-plugin-card-stats="true" className="grid min-w-max flex-1 grid-cols-[max-content_max-content_max-content] content-center items-center gap-x-3 font-mono text-xs leading-none tabular-nums text-muted-foreground">
+                <div className="flex items-center gap-1" title={`下载量：${downloadCount.toLocaleString()}`}>
+                  <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span className="sr-only">下载</span>
+                  <span
+                    data-plugin-stat-value="downloads"
+                    className={`flex h-3.5 items-center whitespace-nowrap text-left ${downloadCount !== 0 ? 'text-primary' : ''}`}
+                  >
+                    {downloadCount >= 10_000 ? `${(downloadCount / 10_000).toFixed(1)}w` : downloadCount.toString()}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1" title="评分">
+                  <Star className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span className="sr-only">评分</span>
+                  <span
+                    data-plugin-stat-value="rating"
+                    className={`flex h-3.5 items-center whitespace-nowrap text-left ${ratingValue !== 0 ? 'text-primary' : ''}`}
+                  >
+                    {ratingValue.toFixed(1)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1" title={`评论数：${reviewCount.toLocaleString()}`}>
+                  <MessageSquare className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span className="sr-only">评论</span>
+                  <span
+                    data-plugin-stat-value="reviews"
+                    className={`flex h-3.5 items-center whitespace-nowrap text-left ${reviewCount !== 0 ? 'text-primary' : ''}`}
+                  >
+                    {reviewCount >= 1_000 ? `${(reviewCount / 1_000).toFixed(1)}k` : reviewCount.toString()}
+                  </span>
+                </div>
               </div>
-              <div className="flex items-center gap-1" title="评分">
-                <Star className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span className="sr-only">评分</span>
-                <span
-                  data-plugin-stat-value="rating"
-                  className={`flex h-3.5 items-center whitespace-nowrap text-left ${ratingValue !== 0 ? 'text-primary' : ''}`}
-                >
-                  {ratingValue.toFixed(1)}
-                </span>
+            ) : (
+              <div data-plugin-card-stats="true" className="flex flex-1 items-center gap-1 text-xs text-muted-foreground" aria-live="polite">
+                {statsStatus === 'loading' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {statsStatus === 'loading' ? '统计加载中' : statsStatus === 'error' ? '统计加载失败' : '暂无统计'}
               </div>
-              <div className="flex items-center gap-1" title={`评论数：${reviewCount.toLocaleString()}`}>
-                <MessageSquare className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span className="sr-only">评论</span>
-                <span
-                  data-plugin-stat-value="reviews"
-                  className={`flex h-3.5 items-center whitespace-nowrap text-left ${reviewCount !== 0 ? 'text-primary' : ''}`}
-                >
-                  {reviewCount >= 1_000 ? `${(reviewCount / 1_000).toFixed(1)}k` : reviewCount.toString()}
-                </span>
-              </div>
-            </div>
+            )}
             {/* 操作区独立处理交互，点击按钮或按钮间隙均不会打开详情。 */}
             <div data-plugin-card-actions="true" className="ml-auto flex shrink-0 items-center justify-end gap-1">
               <Button
@@ -281,7 +292,7 @@ export const PluginCard = memo(function PluginCard({
                 variant={isLiked ? 'secondary' : 'outline'}
                 size="sm"
                 className="gap-1 px-1.5 [&_svg]:size-3.5"
-                title={`${isLiked ? '取消点赞' : '点赞'} · ${likeCount.toLocaleString()}`}
+                title={`${isLiked ? '取消点赞' : '点赞'} · ${likeCount === undefined ? '暂无统计' : likeCount.toLocaleString()}`}
                 aria-label={isLiked ? '取消点赞' : '点赞'}
                 aria-pressed={isLiked}
                 disabled={isLiking}
@@ -293,7 +304,7 @@ export const PluginCard = memo(function PluginCard({
                   <ThumbsUp className="h-4 w-4" />
                 )}
                 <span className="min-w-[3ch] text-right font-mono tabular-nums">
-                  {likeCount >= 1_000 ? `${(likeCount / 1_000).toFixed(1)}k` : likeCount.toString()}
+                  {likeCount === undefined ? '—' : likeCount >= 1_000 ? `${(likeCount / 1_000).toFixed(1)}k` : likeCount.toString()}
                 </span>
               </Button>
               {plugin.installed ? (

@@ -23,6 +23,21 @@ export function invalidatePluginMarketCache(): void {
   localStorage.removeItem(`${PLUGIN_LIST_STORAGE_KEY}-compatible`)
 }
 
+/** 互动只使带有旧统计的官方快照失效，镜像清单继续复用。 */
+export function invalidatePluginMarketStats(): void {
+  cacheGeneration += 1
+  // 在途官方快照也可能带旧统计，后续调用不能继续复用它；镜像清单缓存保留。
+  pluginListRequests.clear()
+  for (const compatibleOnly of [false, true]) {
+    const cached = pluginListCaches.get(compatibleOnly)?.result
+      ?? readPluginListStorageCache(compatibleOnly)?.data
+    if (cached?.some((plugin) => plugin.market_data_source === 'official')) {
+      pluginListCaches.delete(compatibleOnly)
+      localStorage.removeItem(compatibleOnly ? `${PLUGIN_LIST_STORAGE_KEY}-compatible` : PLUGIN_LIST_STORAGE_KEY)
+    }
+  }
+}
+
 interface PluginListStorageCache {
   timestamp: number
   data: PluginInfo[]
@@ -199,9 +214,9 @@ async function fetchPluginListUncached(compatibleOnly: boolean, forceRefresh: bo
     manifest: normalizePluginManifest(item.manifest),
     releases: item.releases,
     assets: item.assets ?? undefined,
-    downloads: item.stats?.downloads ?? 0,
-    rating: item.stats?.rating ?? 0,
-    review_count: item.stats?.comment_count ?? 0,
+    downloads: item.stats?.downloads,
+    rating: item.stats?.rating,
+    review_count: item.stats?.comment_count,
     installed: false,
     source: 'market' as const,
     changelog: normalizeOptionalString(item.changelog),

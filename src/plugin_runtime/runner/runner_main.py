@@ -64,6 +64,7 @@ from src.plugin_runtime.protocol.envelope import (
     LLMProviderDeclaration,
     LLMProviderInvokePayload,
     RegisterPluginPayload,
+    RegisterPluginResultPayload,
     ReloadPluginPayload,
     ReloadPluginResultPayload,
     ReloadPluginsPayload,
@@ -76,7 +77,7 @@ from src.plugin_runtime.protocol.envelope import (
     ValidatePluginConfigPayload,
     ValidatePluginConfigResultPayload,
 )
-from src.plugin_runtime.protocol.errors import ErrorCode
+from src.plugin_runtime.protocol.errors import ErrorCode, RPCError
 from src.plugin_runtime.runner.log_handler import RunnerIPCLogHandler
 from src.plugin_runtime.runner.plugin_paths import PluginPaths, build_plugin_paths
 from src.plugin_runtime.runner.plugin_loader import PluginCandidate, PluginLoader, PluginMeta
@@ -472,7 +473,7 @@ class PluginRunner:
         self._loader.set_blocked_plugin_reasons(self._blocked_plugin_reasons)
         self._start_time: float = time.monotonic()
         self._shutting_down: bool = False
-        self._reload_lock: asyncio.Lock = asyncio.Lock()
+        self._lifecycle_lock: asyncio.Lock = asyncio.Lock()
         self._config_widget_locks: Dict[str, asyncio.Lock] = {}
         self._desktop_pet_button_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
         self._inflight_rpcs: Dict[int, InFlightRPC] = {}
@@ -497,7 +498,7 @@ class PluginRunner:
         self._register_handlers()
 
         # 3. 按依赖顺序导入，再并发初始化；重载请求必须等本轮初始化结束。
-        async with self._reload_lock:
+        async with self._lifecycle_lock:
             plugins = self._loader.discover_and_load(
                 self._plugin_dirs,
                 extra_available=self._external_available_plugins,
@@ -516,15 +517,19 @@ class PluginRunner:
             )
 
         # 5. 等待直到收到关停信号
-        with contextlib.suppress(asyncio.CancelledError):
-            while not self._shutting_down:
-                await asyncio.sleep(1.0)
+        await self._wait_for_shutdown()
 
         # 6. 卸载 IPC 日志 Handler 并刷空剩余缓冲，然后断开连接
         logger.debug("Runner 开始关停")
         await self._uninstall_log_handler()
         await self._rpc_client.disconnect()
         logger.debug("Runner 已退出")
+
+    async def _wait_for_shutdown(self) -> None:
+        """维持 Runner 生命周期，直到宿主关停或进程任务取消。"""
+        with contextlib.suppress(asyncio.CancelledError):
+            while not self._shutting_down:
+                await asyncio.sleep(1.0)
 
     async def _initialize_plugins(
         self, plugins: List[PluginMeta], *, max_concurrency: int = _PLUGIN_STARTUP_CONCURRENCY,
@@ -546,6 +551,12 @@ class PluginRunner:
         semaphore = asyncio.Semaphore(max_concurrency)
         tasks: Dict[str, asyncio.Task[None]] = {}
         completed: Set[str] = set()
+
+        def record_failure(meta: PluginMeta) -> None:
+            if not meta.load_error:
+                raise RuntimeError(f"插件 {meta.plugin_id} 初始化失败，但没有记录失败原因")
+            failed_plugins.add(meta.plugin_id)
+            failed_plugin_reasons[meta.plugin_id] = meta.load_error
 
         def build_progress() -> RunnerStartupProgressPayload:
             return RunnerStartupProgressPayload(
@@ -574,8 +585,7 @@ class PluginRunner:
                 explicitly_disabled_plugins.add(meta.plugin_id)
                 return
             if preparation_status == PluginActivationStatus.FAILED:
-                failed_plugins.add(meta.plugin_id)
-                failed_plugin_reasons[meta.plugin_id] = meta.load_error or "插件初始化失败"
+                record_failure(meta)
                 return
 
             if meta.config_error:
@@ -583,8 +593,7 @@ class PluginRunner:
                 async with semaphore:
                     activation = await self._activate_plugin(meta)
                 if activation == PluginActivationStatus.FAILED:
-                    failed_plugins.add(meta.plugin_id)
-                    failed_plugin_reasons[meta.plugin_id] = meta.load_error or "配置管理状态注册失败"
+                    record_failure(meta)
                 return
 
             # discover_and_load 已验证依赖图无环；本组依赖须等初始化任务结束，
@@ -622,8 +631,7 @@ class PluginRunner:
             if activation_status == PluginActivationStatus.LOADED:
                 available_plugin_versions[meta.plugin_id] = meta.version
                 return
-            failed_plugins.add(meta.plugin_id)
-            failed_plugin_reasons[meta.plugin_id] = meta.load_error or "插件初始化失败"
+            record_failure(meta)
 
         async def initialize_and_report(meta: PluginMeta) -> None:
             await initialize(meta)
@@ -642,7 +650,7 @@ class PluginRunner:
                     task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-        return RunnerReadyPayload.model_validate(build_progress().model_dump(exclude={"loading_plugins"}))
+        return build_progress().completed_result()
 
     def _install_log_handler(self) -> None:
         """握手完成后将 RunnerIPCLogHandler 安装到 logging.root。
@@ -1433,44 +1441,47 @@ class PluginRunner:
             return prefixed_handler
         return getattr(instance, component_name, None)
 
-    async def _bootstrap_plugin(self, meta: PluginMeta, capabilities_required: Optional[List[str]] = None) -> bool:
-        """向 Host 同步插件 bootstrap 能力令牌。"""
+    async def _sync_plugin_capabilities(
+        self, meta: PluginMeta, capabilities_required: Optional[List[str]] = None,
+    ) -> None:
+        """同步能力令牌；None 使用声明，显式空列表表示撤销业务能力。"""
         payload = BootstrapPluginPayload(
             plugin_id=meta.plugin_id,
             plugin_version=meta.version,
             plugin_type=meta.plugin_type if capabilities_required is None or capabilities_required else "extension",
-            capabilities_required=capabilities_required
-            if capabilities_required is not None
-            else list(meta.capabilities_required or []),
+            capabilities_required=meta.capabilities_required if capabilities_required is None else capabilities_required,
         )
+        response = await self._rpc_client.send_request(
+            "plugin.bootstrap", plugin_id=meta.plugin_id, payload=payload.model_dump(), timeout_ms=30000,
+        )
+        if response.error:
+            raise RuntimeError(response.error["message"])
 
+    async def _bootstrap_plugin(self, meta: PluginMeta, capabilities_required: Optional[List[str]] = None) -> bool:
+        """初始化插件能力令牌，并记录这个阶段的加载错误。"""
         try:
-            response = await self._rpc_client.send_request(
-                "plugin.bootstrap",
-                plugin_id=meta.plugin_id,
-                payload=payload.model_dump(),
-                timeout_ms=30000,
-            )
-            if response.error:
-                raise RuntimeError(response.error.get("message", "插件 bootstrap 失败"))
+            await self._sync_plugin_capabilities(meta, capabilities_required)
             return True
         except Exception as e:
             meta.load_error = f"bootstrap 失败: {type(e).__name__}: {e}"
-            logger.error(f"插件 {meta.plugin_id} bootstrap 失败: {e}")
+            logger.error(f"插件 {meta.plugin_id} bootstrap 失败: {e}", exc_info=True)
             return False
 
     async def _deactivate_plugin(self, meta: PluginMeta) -> None:
-        """撤销 bootstrap 期间为插件签发的能力令牌。"""
-        await self._bootstrap_plugin(meta, capabilities_required=[])
+        """撤销能力令牌；清理错误单独记录，不改写最初的加载失败原因。"""
+        try:
+            await self._sync_plugin_capabilities(meta, [])
+        except (RPCError, RuntimeError):
+            logger.exception(f"插件 {meta.plugin_id} 撤销能力令牌失败")
 
-    async def _register_plugin(self, meta: PluginMeta) -> bool:
-        """向 Host 注册单个插件。
+    async def _build_plugin_registration_payload(self, meta: PluginMeta) -> RegisterPluginPayload:
+        """收集和校验插件提供的注册声明。
 
         Args:
             meta: 待注册的插件元数据。
 
         Returns:
-            bool: 是否注册成功。
+            RegisterPluginPayload: 可发送给 Host 的注册声明。
         """
         # 收集插件组件声明
         components: List[ComponentDeclaration] = []
@@ -1537,24 +1548,14 @@ class PluginRunner:
         declared_client_types = sorted(meta.manifest.llm_provider_client_types)
         registered_client_types = sorted(provider.client_type for provider in llm_providers)
         if not meta.config_error and declared_client_types != registered_client_types:
-            logger.error(
-                f"插件 {meta.plugin_id} LLM Provider 声明不一致: "
+            raise ValueError(
+                "LLM Provider 声明不一致: "
                 f"manifest={declared_client_types}, code={registered_client_types}"
             )
-            return False
 
-        try:
-            webui = None if meta.config_error else await asyncio.to_thread(load_webui_extension, meta.plugin_dir)
-        except (OSError, ValueError) as exc:
-            logger.error(f"插件 {meta.plugin_id} WebUI 声明无效: {exc}")
-            return False
-
-        try:
-            desktop_pet_buttons = [] if meta.config_error else read_button_declarations(instance)
-        except Exception:
-            logger.exception(f"插件 {meta.plugin_id} 桌宠按钮声明无效")
-            return False
-        reg_payload = RegisterPluginPayload(
+        webui = None if meta.config_error else await asyncio.to_thread(load_webui_extension, meta.plugin_dir)
+        desktop_pet_buttons = [] if meta.config_error else read_button_declarations(instance)
+        return RegisterPluginPayload(
             plugin_id=meta.plugin_id,
             display_name=meta.manifest.name,
             webui=webui,
@@ -1571,7 +1572,10 @@ class PluginRunner:
             desktop_pet_buttons=desktop_pet_buttons,
         )
 
+    async def _register_plugin(self, meta: PluginMeta) -> bool:
+        """注册边界：插件声明错误和 Host 拒绝都记录为该插件的明确失败。"""
         try:
+            reg_payload = await self._build_plugin_registration_payload(meta)
             response = await self._rpc_client.send_request(
                 "plugin.register_components",
                 plugin_id=meta.plugin_id,
@@ -1579,15 +1583,17 @@ class PluginRunner:
                 timeout_ms=10000,
             )
             if response.error:
-                raise RuntimeError(response.error.get("message", "插件注册失败"))
-            response_payload = response.payload if isinstance(response.payload, dict) else {}
-            if not bool(response_payload.get("accepted", True)):
-                raise RuntimeError(str(response_payload.get("reason", "插件注册失败")))
+                raise RuntimeError(response.error["message"])
+            result = RegisterPluginResultPayload.model_validate(response.payload)
+            if not result.accepted:
+                if result.reason is None or not result.reason.strip():
+                    raise ValueError("Host 拒绝注册但未提供原因")
+                raise RuntimeError(result.reason)
             logger.debug(f"插件 {meta.plugin_id} 注册完成")
             return True
         except Exception as e:
             meta.load_error = f"组件注册失败: {type(e).__name__}: {e}"
-            logger.error(f"插件 {meta.plugin_id} 注册失败: {e}")
+            logger.error(f"插件 {meta.plugin_id} 注册失败: {e}", exc_info=True)
             return False
 
     @staticmethod
@@ -2493,13 +2499,15 @@ class PluginRunner:
 
     async def _handle_shutdown(self, envelope: Envelope) -> Envelope:
         """处理关停 — 调用所有插件的 on_unload 后退出"""
-        logger.debug("收到 shutdown 信号，开始调用 on_unload")
+        logger.debug("收到 shutdown 信号，等待生命周期操作结束")
         await self._dump_inflight_debug("shutdown")
-        for plugin_id in list(self._loader.list_plugins()):
-            meta = self._loader.get_plugin(plugin_id)
-            if meta is not None:
-                await self._unload_plugin(meta, reason="runner_shutdown")
-        self._shutting_down = True
+        # 与初始化、重载和卸载使用同一生命周期锁，不能清理到一半又注册新插件。
+        async with self._lifecycle_lock:
+            for plugin_id in list(self._loader.list_plugins()):
+                meta = self._loader.get_plugin(plugin_id)
+                if meta is not None:
+                    await self._unload_plugin(meta, reason="runner_shutdown")
+            self._shutting_down = True
         return envelope.make_response(payload={"acknowledged": True})
 
     async def _handle_config_updated(self, envelope: Envelope) -> Envelope:
@@ -2684,7 +2692,7 @@ class PluginRunner:
         meta = self._loader.get_plugin(envelope.plugin_id)
         if meta is None:
             return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, "插件未加载")
-        async with self._reload_lock:
+        async with self._lifecycle_lock:
             try:
                 extension = await asyncio.to_thread(load_webui_extension, meta.plugin_dir)
                 if extension is None:
@@ -2711,13 +2719,15 @@ class PluginRunner:
         except Exception as exc:
             return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, str(exc))
 
-        if self._reload_lock.locked():
+        if self._lifecycle_lock.locked():
             return envelope.make_error_response(
                 ErrorCode.E_RELOAD_IN_PROGRESS.value,
-                f"插件 {payload.plugin_id} 重载请求被拒绝：已有重载任务正在执行",
+                f"插件 {payload.plugin_id} 重载请求被拒绝：插件正在加载或停止",
             )
 
-        async with self._reload_lock:
+        async with self._lifecycle_lock:
+            if self._shutting_down:
+                return envelope.make_error_response(ErrorCode.E_SHUTTING_DOWN.value, "Runner 已进入关停流程")
             result = await self._reload_plugin_by_id(
                 payload.plugin_id,
                 payload.reason,
@@ -2733,14 +2743,16 @@ class PluginRunner:
         except Exception as exc:
             return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, str(exc))
 
-        if self._reload_lock.locked():
+        if self._lifecycle_lock.locked():
             requested_plugin_ids = ", ".join(self._normalize_requested_plugin_ids(payload.plugin_ids)) or "<empty>"
             return envelope.make_error_response(
                 ErrorCode.E_RELOAD_IN_PROGRESS.value,
-                f"插件 {requested_plugin_ids} 批量卸载请求被拒绝：已有重载或卸载任务正在执行",
+                f"插件 {requested_plugin_ids} 批量卸载请求被拒绝：插件正在加载或停止",
             )
 
-        async with self._reload_lock:
+        async with self._lifecycle_lock:
+            if self._shutting_down:
+                return envelope.make_error_response(ErrorCode.E_SHUTTING_DOWN.value, "Runner 已进入关停流程")
             result = await self._unload_plugins_by_ids(list(payload.plugin_ids), payload.reason)
             return envelope.make_response(payload=result.model_dump())
 
@@ -2752,14 +2764,16 @@ class PluginRunner:
         except Exception as exc:
             return envelope.make_error_response(ErrorCode.E_BAD_PAYLOAD.value, str(exc))
 
-        if self._reload_lock.locked():
+        if self._lifecycle_lock.locked():
             requested_plugin_ids = ", ".join(self._normalize_requested_plugin_ids(payload.plugin_ids)) or "<empty>"
             return envelope.make_error_response(
                 ErrorCode.E_RELOAD_IN_PROGRESS.value,
-                f"插件 {requested_plugin_ids} 批量重载请求被拒绝：已有重载任务正在执行",
+                f"插件 {requested_plugin_ids} 批量重载请求被拒绝：插件正在加载或停止",
             )
 
-        async with self._reload_lock:
+        async with self._lifecycle_lock:
+            if self._shutting_down:
+                return envelope.make_error_response(ErrorCode.E_SHUTTING_DOWN.value, "Runner 已进入关停流程")
             result = await self._reload_plugins_by_ids(
                 list(payload.plugin_ids),
                 payload.reason,

@@ -21,6 +21,7 @@ from src.plugin_runtime import integration as integration_module
 from src.plugin_runtime.host import supervisor as supervisor_module
 from src.plugin_runtime.host.supervisor import PluginRunnerSupervisor
 from src.plugin_runtime.integration import DependencySyncState, PluginRuntimeManager
+from src.plugin_runtime.plugin_catalog import PluginCatalogEntry
 from src.plugin_runtime.protocol.envelope import (
     Envelope,
     HealthPayload,
@@ -511,8 +512,28 @@ async def test_start_waits_for_load_round_including_failed_plugins(runtime, monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["connection"])
-async def test_start_timeout_stops_runner_instead_of_reporting_started(runtime, monkeypatch, stage: str) -> None:
+async def test_registration_cannot_override_reported_failure_or_supply_dependency_version(runtime):
+    supervisor, _ = runtime
+    await _register(supervisor, _QQ)
+    assert supervisor.get_plugin_load_statuses()[_QQ] == "loading"
+    assert supervisor.get_loaded_plugin_versions() == {}
+
+    await _ready(supervisor, RunnerReadyPayload(
+        failed_plugins=[_QQ], failed_plugin_reasons={_QQ: "on_load failed"},
+    ))
+    assert supervisor.get_plugin_load_statuses()[_QQ] == "failed"
+    assert supervisor.get_plugin_load_failure_reasons()[_QQ] == "on_load failed"
+    assert supervisor.get_loaded_plugin_versions() == {}
+
+    supervisor._apply_plugin_reload_result(
+        reloaded_plugins=[_QQ], inactive_plugins=[], explicitly_disabled_plugins=[], failed_plugins={},
+    )
+    assert supervisor.get_plugin_load_statuses()[_QQ] == "success"
+    assert _QQ in supervisor.get_loaded_plugin_versions()
+
+
+@pytest.mark.asyncio
+async def test_connection_timeout_stops_unconnected_runner(runtime, monkeypatch) -> None:
     supervisor, boundary = runtime
     supervisor._running = False
     supervisor._runner_spawn_timeout = 0.01
@@ -520,9 +541,7 @@ async def test_start_timeout_stops_runner_instead_of_reporting_started(runtime, 
 
     async def spawn_loading_runner() -> None:
         supervisor._runner_process = process
-        boundary.is_connected = stage == "ready"
-        if boundary.is_connected:
-            await _register(supervisor, _QQ)
+        boundary.is_connected = False
 
     monkeypatch.setattr(supervisor, "_spawn_runner", spawn_loading_runner)
     with pytest.raises(TimeoutError):
@@ -548,7 +567,7 @@ async def test_repeated_loading_timeouts_keep_runner_and_publish_partial_results
 
     def status_changed() -> None:
         nonlocal timeout_count
-        if supervisor._startup_timeout_reason:
+        if supervisor.startup_load_status == "timed_out":
             timeout_count += 1
             if timeout_count >= 2:
                 timed_out_twice.set()
@@ -583,7 +602,7 @@ async def test_repeated_loading_timeouts_keep_runner_and_publish_partial_results
         await asyncio.wait_for(startup, 1.0)
         assert process.returncode is None
         assert supervisor.get_plugin_load_statuses()[_EXTENSION] == "success"
-        assert not supervisor._startup_timeout_reason
+        assert supervisor.startup_load_reason == ""
         # 最终 ready 优先于迟到的启动进度。
         await supervisor._handle_startup_progress(_request(
             "runner.startup_progress", RunnerStartupProgressPayload(loading_plugins=[_EXTENSION]).model_dump(),
@@ -642,6 +661,13 @@ async def test_manager_starts_watcher_only_after_runner_load_round(runtime, monk
         manager._builtin_supervisor = supervisor
 
     watcher_start = AsyncMock()
+    async def initialize_catalog(*args):
+        manager._plugin_catalog._entries = {
+            tmp_path / "qq": PluginCatalogEntry(_QQ, tmp_path / "qq", {"plugin_type": "adapter"}, False, True, "", None),
+        }
+        manager._plugin_catalog._initialized = True
+
+    monkeypatch.setattr(manager._plugin_catalog, "start", initialize_catalog)
     monkeypatch.setattr(supervisor, "_spawn_runner", spawn_loading_runner)
     monkeypatch.setattr(supervisor, "_health_check_loop", AsyncMock())
     monkeypatch.setattr(manager, "_resolve_runtime_plugin_dirs", lambda: ([tmp_path], []))
@@ -666,7 +692,7 @@ async def test_manager_starts_watcher_only_after_runner_load_round(runtime, monk
             await _ready(supervisor, RunnerReadyPayload(loaded_plugins=[_QQ], failed_plugins=[_EXTENSION]))
         else:
             async def wait_for_timeout():
-                while not supervisor._startup_timeout_reason:
+                while supervisor.startup_load_status != "timed_out":
                     await asyncio.sleep(0)
 
             await asyncio.wait_for(wait_for_timeout(), 1.0)
@@ -684,7 +710,6 @@ async def test_manager_starts_watcher_only_after_runner_load_round(runtime, monk
             watcher_start.assert_not_awaited()
             assert not manager._started
             assert manager._builtin_supervisor is supervisor
-            monkeypatch.setattr(manager, "_iter_discovered_plugin_paths", lambda dirs: iter([(_QQ, tmp_path / "qq")]))
             snapshot = await manager.get_plugin_state_snapshot()
             assert snapshot["statuses"][_QQ] == "failed"
             assert "退出码 1" in snapshot["failure_reasons"][_QQ]

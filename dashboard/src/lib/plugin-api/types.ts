@@ -50,7 +50,6 @@ export interface InstalledPlugin {
     [key: string]: unknown // 允许其他字段
   }
   path: string
-  changelog?: string | null
   enabled?: boolean | null
   disabled?: boolean
   loaded?: boolean

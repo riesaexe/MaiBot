@@ -1,6 +1,7 @@
 import { memo, useMemo, useState } from 'react'
 
 import { isNapcatAdapter } from '@/lib/plugin-info'
+import type { PluginStatsStatus } from '@/lib/plugin-stats'
 
 import type {
   GitStatus,
@@ -41,7 +42,8 @@ interface MarketplaceTabProps {
   sortBy: MarketplaceSortKey
   gitStatus: GitStatus | null
   maimaiVersion: MaimaiVersion | null
-  pluginStats: Record<string, PluginStatsData>
+  pluginStats: Record<string, Partial<PluginStatsData>>
+  statsStatus?: PluginStatsStatus
   /** 排序快照不随本次会话内的点赞变化，避免卡片在点击后当场换位。 */
   sortPluginStats: Record<string, PluginStatsData>
   pluginProgressById: PluginProgressById
@@ -252,6 +254,7 @@ export const MarketplaceTab = memo(function MarketplaceTab({
   gitStatus,
   maimaiVersion,
   pluginStats,
+  statsStatus = 'ready',
   sortPluginStats,
   pluginProgressById,
   likingPluginIds,
@@ -277,10 +280,9 @@ export const MarketplaceTab = memo(function MarketplaceTab({
 
   // 排序只依赖插件、排序快照和筛选结果，不随点赞、进度或列数变化重算。
   const displayPlugins = useMemo(() => {
+    if (statsStatus !== 'ready' && ['downloads', 'likes', 'rating'].includes(sortBy)) return plugins
     const getPluginStats = (plugin: PluginInfo): PluginStatsData | undefined => {
-      const statsIds = [plugin.manifest?.id, plugin.id].filter((id): id is string => Boolean(id))
-
-      return statsIds.map((id) => sortPluginStats[id]).find(Boolean)
+      return plugin.manifest.id ? sortPluginStats[plugin.manifest.id] : undefined
     }
 
     const getSortValue = (
@@ -363,7 +365,7 @@ export const MarketplaceTab = memo(function MarketplaceTab({
       (plugin) => !surprisePluginIds.has(getPluginIdentity(plugin))
     )
     return [...surprisePlugins, ...mainPlugins]
-  }, [plugins, sortBy, sortPluginStats, renderTime, surpriseSeed])
+  }, [plugins, sortBy, sortPluginStats, statsStatus, renderTime, surpriseSeed])
   const isAnyPluginInstalling = Object.values(pluginProgressById).some(
     (progress) => progress.operation === 'install' && progress.stage === 'loading'
   )
@@ -375,6 +377,7 @@ export const MarketplaceTab = memo(function MarketplaceTab({
       gitStatus={gitStatus}
       maimaiVersion={maimaiVersion}
       stats={plugin.manifest?.id ? pluginStats[plugin.manifest.id] : undefined}
+      statsStatus={statsStatus}
       loadProgress={pluginProgressById[plugin.id] ?? null}
       isAnyPluginInstalling={isAnyPluginInstalling}
       isLiking={likingPluginIds.has(plugin.manifest?.id || plugin.id)}
