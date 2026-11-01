@@ -229,6 +229,7 @@ class DesktopPetService:
             self._button_sync_task = self._observe(self._sync_buttons())
 
     async def _sync_buttons(self) -> None:
+        """读取各插件的桌宠按钮状态并推送给窗口；同步期间按钮又有变动时重新同步一轮。"""
         from src.plugin_runtime.integration import get_plugin_runtime_manager
 
         runtime = get_plugin_runtime_manager()
@@ -240,7 +241,8 @@ class DesktopPetService:
             )
             current = runtime.get_desktop_pet_button_plugins()
             buttons: List[Dict[str, Any]] = []
-            for (plugin_id, contribution), result in zip(plugins.items(), results):
+            # gather 按 plugins 的顺序逐个返回结果，两边数量必然相等。
+            for (plugin_id, contribution), result in zip(plugins.items(), results, strict=True):
                 if current.get(plugin_id) != contribution:
                     continue  # 请求期间已卸载或重载的贡献不能重新出现在窗口里。
                 if isinstance(result, BaseException):
